@@ -1,10 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useImperativeHandle, useRef, type Ref } from "react";
+import { useCallback, useEffect, useImperativeHandle, useRef, useState, type Ref } from "react";
 import type { DrawStroke } from "@/lib/types";
 import { paintStroke, paintStrokes, rasterizePhoto } from "@/lib/drawing";
 import { isImageFile, prepareImage } from "@/lib/images";
 import { BRUSH_SIZES, DRAWING_COLORS, type DrawingSettings } from "./DrawingPane";
+import { WebcamCapture } from "./WebcamCapture";
 
 const MAX_UNDO = 30;
 
@@ -29,6 +30,7 @@ function containRect(cw: number, ch: number, iw: number, ih: number): Contain {
 export type PhotoPaneHandle = {
   undo: () => void;
   clearDrawings: () => void;
+  startWebcam: () => void;
 };
 
 /**
@@ -58,6 +60,7 @@ export function PhotoPane({
   const dragRef = useRef<DrawStroke | null>(null);
   const undoRef = useRef<DrawStroke[][]>([]);
   const strokesRef = useRef(strokes);
+  const [webcam, setWebcam] = useState(false);
 
   useEffect(() => {
     strokesRef.current = strokes;
@@ -146,6 +149,9 @@ export function PhotoPane({
       undoRef.current = [...undoRef.current, strokesRef.current].slice(-MAX_UNDO);
       void commit([]);
     },
+    startWebcam() {
+      setWebcam(true);
+    },
   }));
 
   function localPoint(event: React.PointerEvent) {
@@ -208,7 +214,15 @@ export function PhotoPane({
         void handleFiles(e.dataTransfer.files);
       }}
     >
-      {photo ? (
+      {webcam ? (
+        <WebcamCapture
+          onCapture={(captured) => {
+            setWebcam(false);
+            onChange(captured);
+          }}
+          onCancel={() => setWebcam(false)}
+        />
+      ) : photo ? (
         <canvas
           ref={canvasRef}
           className="nodrag nowheel h-full w-full cursor-crosshair touch-none"
@@ -219,12 +233,14 @@ export function PhotoPane({
           onContextMenu={(e) => e.preventDefault()}
         />
       ) : (
-        <button
-          className="nodrag flex h-full w-full cursor-pointer items-center justify-center text-neutral-400 hover:text-neutral-900"
-          onClick={() => inputRef.current?.click()}
-        >
-          upload a photo — click or drop an image
-        </button>
+        <div className="nodrag flex h-full w-full flex-col items-center justify-center gap-2 text-neutral-400">
+          <button className="cursor-pointer hover:text-neutral-900" onClick={() => inputRef.current?.click()}>
+            upload a photo — click or drop an image
+          </button>
+          <button className="underline hover:text-neutral-900" onClick={() => setWebcam(true)}>
+            or take a photo
+          </button>
+        </div>
       )}
       <input
         ref={inputRef}
@@ -249,6 +265,7 @@ export function PhotoToolbar({
   onSettingsChange,
   onUndo,
   onClearDrawings,
+  onTakePhoto,
 }: {
   photo: string | null;
   hasDrawings: boolean;
@@ -257,6 +274,7 @@ export function PhotoToolbar({
   onSettingsChange: (settings: DrawingSettings) => void;
   onUndo: () => void;
   onClearDrawings: () => void;
+  onTakePhoto: () => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -272,6 +290,9 @@ export function PhotoToolbar({
         onClick={() => inputRef.current?.click()}
       >
         {photo ? "replace photo" : "upload photo"}
+      </button>
+      <button className="block text-neutral-500 underline hover:text-neutral-900" onClick={onTakePhoto}>
+        take a photo
       </button>
       {photo && (
         <button

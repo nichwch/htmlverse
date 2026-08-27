@@ -45,6 +45,7 @@ import {
   type DrawingPaneHandle,
   type DrawingSettings,
 } from "./DrawingPane";
+import { resolveItems } from "@/lib/drawing";
 import { WireframePane, WireframeToolbar, type WireframeTool } from "./WireframePane";
 import { DEFAULT_FONT_SIZE } from "@/lib/wireframe";
 import { defaultNodeName, isDefaultNodeName, matchesTabLabel } from "@/lib/nodeNames";
@@ -70,7 +71,7 @@ const TAB_TITLES: Record<NodeTab, string> = {
   md: "md — write markdown",
   draw: "draw — sketch by hand",
   wire: "wire — lay out a wireframe",
-  photo: "photo — upload a reference image",
+  photo: "photo — upload or take a reference image",
 };
 
 /** Leaves at least this much room for the preview when dragging the sidebar wider. */
@@ -207,6 +208,13 @@ function PromptNode({ id, data, width, height, selected }: NodeProps<PromptFlowN
   const tab = data.tab ?? "chat";
   /** This node's own output type, which colors its title chip. */
   const kind = outputKind(tab);
+
+  // Legacy formats (flat strokes, layers) read as a flat item list; memoized
+  // so the draw surface doesn't repaint on unrelated re-renders.
+  const drawItems = useMemo(
+    () => resolveItems(data.strokes, data.drawLayers, data.drawItems),
+    [data.strokes, data.drawLayers, data.drawItems]
+  );
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ block: "nearest" });
@@ -829,6 +837,7 @@ function PromptNode({ id, data, width, height, selected }: NodeProps<PromptFlowN
                     onSettingsChange={setPhotoSettings}
                     onUndo={() => photoRef.current?.undo()}
                     onClearDrawings={() => photoRef.current?.clearDrawings()}
+                    onTakePhoto={() => photoRef.current?.startWebcam()}
                   />
                 )}
               </div>
@@ -844,10 +853,12 @@ function PromptNode({ id, data, width, height, selected }: NodeProps<PromptFlowN
           <div className="min-w-0 flex-1">
             {tab === "draw" ? (
               <DrawingPane
-                strokes={data.strokes ?? EMPTY_STROKES}
+                items={drawItems}
                 base={data.drawBase ?? null}
                 settings={drawSettings}
-                onCommit={(strokes, drawing) => updateNodeData(id, { strokes, drawing })}
+                onCommit={(drawItems, drawing) =>
+                  updateNodeData(id, { drawItems, drawing, strokes: undefined, drawLayers: undefined })
+                }
                 onZoomChange={setDrawZoom}
                 handleRef={drawingRef}
               />

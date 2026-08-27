@@ -52,8 +52,12 @@ function toFlowNodes(stored: StoredNode[]): PromptFlowNode[] {
     data: {
       ...n.data,
       // Sketches drawn before the surface became infinite become a fixed
-      // backdrop, so nothing already drawn is lost.
-      ...(n.data.drawing && !n.data.strokes ? { drawBase: n.data.drawing } : {}),
+      // backdrop, so nothing already drawn is lost. Newer drawings keep
+      // their content in drawItems (or the legacy strokes/drawLayers), so
+      // they must not become backdrops.
+      ...(n.data.drawing && !n.data.strokes && !n.data.drawLayers && !n.data.drawItems
+        ? { drawBase: n.data.drawing }
+        : {}),
       loading: false,
       error: null,
     },
@@ -74,6 +78,8 @@ function toStoredNodes(nodes: PromptFlowNode[]): StoredNode[] {
       markdown: data.markdown,
       drawing: data.drawing,
       strokes: data.strokes,
+      drawLayers: data.drawLayers,
+      drawItems: data.drawItems,
       drawBase: data.drawBase,
       wireframe: data.wireframe,
       photo: data.photo,

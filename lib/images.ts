@@ -12,7 +12,7 @@ function readAsDataURL(file: File): Promise<string> {
   });
 }
 
-function loadImage(src: string): Promise<HTMLImageElement> {
+export function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => resolve(img);
@@ -44,4 +44,23 @@ export async function prepareImage(file: File): Promise<string> {
 
 export function isImageFile(file: File): boolean {
   return file.type.startsWith("image/");
+}
+
+/**
+ * Grabs the current webcam frame as a JPEG data URL, downscaled like
+ * prepareImage. Mirroring bakes in the flip the preview shows, so the photo
+ * matches what the user saw.
+ */
+export function captureFrame(video: HTMLVideoElement, mirror = false): string {
+  const scale = Math.min(1, MAX_DIMENSION / Math.max(video.videoWidth, video.videoHeight, 1));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+  canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+  const context = canvas.getContext("2d")!;
+  if (mirror) {
+    context.translate(canvas.width, 0);
+    context.scale(-1, 1);
+  }
+  context.drawImage(video, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/jpeg", 0.85);
 }

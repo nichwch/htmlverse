@@ -1,19 +1,21 @@
 "use client";
 
 import { useCallback, useEffect, useImperativeHandle, useRef, useState, type Ref } from "react";
-import type { DrawStroke } from "@/lib/types";
+import type { DrawItem, DrawStroke } from "@/lib/types";
 import {
   clampDrawZoom,
   drawingBounds,
   fitView,
-  paintStroke,
-  paintStrokes,
+  floodFillImage,
+  itemImageUrls,
+  paintItems,
   rasterizeDrawing,
   BASE_RECT,
   type DrawView,
 } from "@/lib/drawing";
+import { loadImage } from "@/lib/images";
 
-export type DrawingTool = "brush" | "eraser" | "pan";
+export type DrawingTool = "brush" | "eraser" | "fill" | "pan";
 
 export type DrawingSettings = {
   color: string;
@@ -52,30 +54,40 @@ const ERASER_SCALE = 4;
 const MAX_UNDO = 30;
 /** World-space spacing of the backdrop dots, so panning is visible. */
 const GRID_SPACING = 32;
+/** The decoded-image cache is dropped and lazily rebuilt past this size. */
+const MAX_CACHE_IMAGES = 200;
 
 type Drag =
   | { mode: "draw"; stroke: DrawStroke }
   | { mode: "pan"; startX: number; startY: number; originX: number; originY: number };
 
+function isTypingTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof HTMLElement &&
+    (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName))
+  );
+}
+
 /**
  * The main-panel drawing surface for a node's draw tab: an infinite canvas —
  * scroll to zoom, middle-drag or hold space to pan, or use the pan tool.
- * Strokes are stored as vectors in world space and flattened to a PNG on
- * commit, which is what mentions and previews consume.
+ * Content is a flat list of vector strokes and flood-fill bitmaps in world
+ * space, flattened to a PNG on commit, which is what mentions and previews
+ * consume.
  */
 export function DrawingPane({
-  strokes,
+  items,
   base,
   settings,
   onCommit,
   onZoomChange,
   handleRef,
 }: {
-  strokes: DrawStroke[];
-  /** Legacy fixed-canvas sketch, pinned at the origin beneath the strokes. */
+  items: DrawItem[];
+  /** Legacy fixed-canvas sketch, pinned at the origin beneath the items. */
   base: string | null;
   settings: DrawingSettings;
-  onCommit: (strokes: DrawStroke[], drawing: string | null) => void;
+  onCommit: (items: DrawItem[], drawing: string | null) => void;
   /** Zoom only, so panning doesn't re-render the surrounding node. */
   onZoomChange: (zoom: number) => void;
   handleRef: Ref<DrawingPaneHandle>;
@@ -83,20 +95,22 @@ export function DrawingPane({
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const baseImageRef = useRef<HTMLImageElement | null>(null);
+  const imageCacheRef = useRef(new Map<string, HTMLImageElement>());
   const dragRef = useRef<Drag | null>(null);
-  const undoRef = useRef<DrawStroke[][]>([]);
+  const undoRef = useRef<DrawItem[][]>([]);
   const spaceRef = useRef(false);
   const viewRef = useRef<DrawView>({ x: 0, y: 0, zoom: 1 });
-  const strokesRef = useRef(strokes);
+  const itemsRef = useRef(items);
+  const commitQueueRef = useRef(Promise.resolve());
 
   const [view, setViewState] = useState<DrawView>({ x: 0, y: 0, zoom: 1 });
   const [panning, setPanning] = useState(false);
 
-  // Mirrors of render state for the imperative paint path and event handlers.
+  // Mirror of render state for the imperative paint path and event handlers.
   // Effects run in order, so this lands before the repaint effect below.
   useEffect(() => {
-    strokesRef.current = strokes;
-  }, [strokes]);
+    itemsRef.current = items;
+  }, [items]);
 
   const setView = useCallback(
     (next: DrawView) => {
@@ -107,7 +121,7 @@ export function DrawingPane({
     [onZoomChange]
   );
 
-  /** Full repaint: grid, legacy backdrop, every committed stroke. */
+  /** Full repaint: grid, legacy backdrop, every committed item. */
   const redraw = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -137,10 +151,14 @@ export function DrawingPane({
     if (baseImage) {
       ctx.drawImage(baseImage, BASE_RECT.x, BASE_RECT.y, BASE_RECT.w, BASE_RECT.h);
     }
-    paintStrokes(ctx, strokesRef.current);
 
     const drag = dragRef.current;
-    if (drag?.mode === "draw") paintStroke(ctx, drag.stroke);
+    paintItems(
+      ctx,
+      itemsRef.current,
+      imageCacheRef.current,
+      drag?.mode === "draw" ? drag.stroke : undefined
+    );
   }, []);
 
   /** Backing store follows the element size and pixel ratio. */
@@ -181,14 +199,29 @@ export function DrawingPane({
     img.src = base;
   }, [base, redraw]);
 
-  useEffect(redraw, [strokes, view, redraw]);
+  // Decode fill bitmaps referenced by the items; each arrival repaints once.
+  useEffect(() => {
+    const cache = imageCacheRef.current;
+    if (cache.size > MAX_CACHE_IMAGES) cache.clear();
+    for (const url of itemImageUrls(items)) {
+      if (cache.has(url)) continue;
+      loadImage(url)
+        .then((img) => {
+          cache.set(url, img);
+          redraw();
+        })
+        .catch(() => undefined);
+    }
+  }, [items, redraw]);
+
+  useEffect(redraw, [items, view, redraw]);
 
   const fit = useCallback(() => {
     const wrap = wrapRef.current;
     if (!wrap) return;
     setView(
       fitView(
-        drawingBounds(strokesRef.current, Boolean(base)),
+        drawingBounds(itemsRef.current, Boolean(base)),
         wrap.clientWidth,
         wrap.clientHeight
       )
@@ -201,14 +234,41 @@ export function DrawingPane({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount only
   }, []);
 
-  // Space is the usual hold-to-pan modifier; ignore it while typing elsewhere.
-  useEffect(() => {
-    const typing = (target: EventTarget | null) =>
-      target instanceof HTMLElement &&
-      (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
+  // Serialized: rasterizing is async, and two commits in flight must land in
+  // the order they were made, never clobbering each other's item list.
+  function commit(next: DrawItem[]) {
+    const run = async () =>
+      onCommit(next, await rasterizeDrawing(next, base, imageCacheRef.current));
+    commitQueueRef.current = commitQueueRef.current.then(run).catch(() => undefined);
+  }
 
+  function pushUndo() {
+    undoRef.current = [...undoRef.current, itemsRef.current].slice(-MAX_UNDO);
+  }
+
+  function undo() {
+    const previous = undoRef.current.pop();
+    if (!previous) return;
+    commit(previous);
+  }
+
+  // Space is the usual hold-to-pan modifier; Cmd/Ctrl+Z undoes. Both are
+  // ignored while typing elsewhere.
+  useEffect(() => {
     const down = (event: KeyboardEvent) => {
-      if (event.code === "Space" && !typing(event.target)) spaceRef.current = true;
+      if (event.code === "Space" && !isTypingTarget(event.target)) {
+        spaceRef.current = true;
+        return;
+      }
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        !event.shiftKey &&
+        event.key.toLowerCase() === "z" &&
+        !isTypingTarget(event.target)
+      ) {
+        event.preventDefault();
+        undo();
+      }
     };
     const up = (event: KeyboardEvent) => {
       if (event.code === "Space") spaceRef.current = false;
@@ -219,22 +279,14 @@ export function DrawingPane({
       window.removeEventListener("keydown", down);
       window.removeEventListener("keyup", up);
     };
-  }, []);
-
-  async function commit(next: DrawStroke[]) {
-    onCommit(next, await rasterizeDrawing(next, base));
-  }
+  });
 
   useImperativeHandle(handleRef, () => ({
-    undo() {
-      const previous = undoRef.current.pop();
-      if (!previous) return;
-      void commit(previous);
-    },
+    undo,
     clear() {
-      if (!strokesRef.current.length) return;
-      undoRef.current = [...undoRef.current, strokesRef.current].slice(-MAX_UNDO);
-      void commit([]);
+      if (!itemsRef.current.length) return;
+      pushUndo();
+      commit([]);
     },
     fit,
   }));
@@ -251,6 +303,27 @@ export function DrawingPane({
 
   function toWorld(point: { x: number; y: number }, current: DrawView) {
     return { x: (point.x - current.x) / current.zoom, y: (point.y - current.y) / current.zoom };
+  }
+
+  function fillAt(point: { x: number; y: number }) {
+    const canvas = canvasRef.current!;
+    const topLeft = toWorld({ x: 0, y: 0 }, viewRef.current);
+    const bottomRight = toWorld(
+      { x: canvas.clientWidth, y: canvas.clientHeight },
+      viewRef.current
+    );
+    const fill = floodFillImage(
+      itemsRef.current,
+      baseImageRef.current,
+      imageCacheRef.current,
+      toWorld(point, viewRef.current),
+      settings.color,
+      { x: topLeft.x, y: topLeft.y, w: bottomRight.x - topLeft.x, h: bottomRight.y - topLeft.y }
+    );
+    if (!fill) return;
+    pushUndo();
+    // Fills go beneath the linework, so outlines stay on top.
+    commit([{ kind: "image", image: fill }, ...itemsRef.current]);
   }
 
   function onWheel(event: React.WheelEvent) {
@@ -282,6 +355,12 @@ export function DrawingPane({
     }
 
     if (event.button !== 0) return;
+
+    if (settings.tool === "fill") {
+      fillAt(point);
+      return;
+    }
+
     canvas.setPointerCapture(event.pointerId);
     const world = toWorld(point, viewRef.current);
     const eraser = settings.tool === "eraser";
@@ -321,8 +400,8 @@ export function DrawingPane({
     setPanning(false);
     if (drag?.mode !== "draw") return;
 
-    undoRef.current = [...undoRef.current, strokesRef.current].slice(-MAX_UNDO);
-    void commit([...strokesRef.current, drag.stroke]);
+    pushUndo();
+    commit([...itemsRef.current, { kind: "stroke", stroke: drag.stroke }]);
   }
 
   const cursor = panning
@@ -344,7 +423,7 @@ export function DrawingPane({
         onContextMenu={(e) => e.preventDefault()}
       />
       <p className="pointer-events-none absolute right-2 bottom-1 text-neutral-300">
-        scroll to zoom · space or middle-drag to pan
+        scroll to zoom · space or middle-drag to pan · ⌘Z undo
       </p>
     </div>
   );
@@ -380,7 +459,7 @@ export function DrawingToolbar({
             <button
               key={color}
               className={`h-6 w-6 border ${
-                settings.color === color && settings.tool === "brush"
+                settings.color === color && (settings.tool === "brush" || settings.tool === "fill")
                   ? "border-neutral-900 ring-1 ring-neutral-900"
                   : "border-neutral-300"
               }`}
@@ -415,7 +494,7 @@ export function DrawingToolbar({
       <div>
         <p className="mb-1 text-neutral-400">tool</p>
         <div className="flex gap-1">
-          {(["brush", "eraser", "pan"] as const).map((tool) => (
+          {(["brush", "eraser", "fill", "pan"] as const).map((tool) => (
             <button
               key={tool}
               className={`border px-2 py-0.5 ${

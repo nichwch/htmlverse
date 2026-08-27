@@ -89,6 +89,29 @@ export type DrawStroke = {
   points: number[];
 };
 
+/** A flood-filled region on the draw surface, stored as a bitmap patch. */
+export type DrawImage = {
+  /** World-space rect the image occupies. */
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** PNG data URL. */
+  data: string;
+};
+
+export type DrawItem =
+  | { kind: "stroke"; stroke: DrawStroke }
+  | { kind: "image"; image: DrawImage };
+
+/** Legacy layered drawing format, flattened into drawItems on first edit. */
+export type DrawLayer = {
+  id: string;
+  name: string;
+  visible: boolean;
+  items: DrawItem[];
+};
+
 export type PromptNodeData = {
   model: string;
   messages: ChatMessage[];
@@ -96,7 +119,11 @@ export type PromptNodeData = {
   markdown?: string | null;
   /** Hand-drawn sketch from the draw tab, rasterized to a PNG data URL. */
   drawing?: string | null;
+  /** Legacy flat stroke list, migrated into drawItems on first edit. */
   strokes?: DrawStroke[];
+  /** Legacy layered format, flattened into drawItems on first edit. */
+  drawLayers?: DrawLayer[];
+  drawItems?: DrawItem[];
   /**
    * A sketch made before the draw surface became infinite, kept as a fixed
    * backdrop at the origin so nothing drawn back then is lost.
