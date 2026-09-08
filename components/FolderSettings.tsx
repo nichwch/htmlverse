@@ -121,6 +121,14 @@ export default function FolderSettings({ onCanvasesChanged }: { onCanvasesChange
         </>
       )}
 
+      {status.skipped.length > 0 && (
+        <div className="mt-2 text-amber-600">
+          <p>left {status.skipped.length === 1 ? "one file" : `${status.skipped.length} files`} out of the merge:</p>
+          {status.skipped.map((file) => (
+            <p key={file} className="mt-1">{file}</p>
+          ))}
+        </div>
+      )}
       {status.error && <p className="mt-1 text-red-600">{status.error}</p>}
       {note && <p className="mt-1 text-neutral-500">{note}</p>}
     </div>

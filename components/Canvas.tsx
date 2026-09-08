@@ -230,7 +230,7 @@ function CanvasInner({ canvasId, name }: { canvasId: string; name: string }) {
       nodes: toStoredNodes(nodes),
     };
     return {
-      filename: filenameForCanvas(currentName),
+      filename: filenameForCanvas(currentName, canvasId),
       json: `${JSON.stringify(file, null, 2)}\n`,
     };
   }, [canvasId, name, nodes]);

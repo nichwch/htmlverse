@@ -126,7 +126,11 @@ export function filenameFor(canvasName: string): string {
   return `${slugify(canvasName)}.html`;
 }
 
-/** The editable canvas: nodes, chat, drawings — same shape as a folder-backed file. */
-export function filenameForCanvas(canvasName: string): string {
-  return `${slugify(canvasName)}.json`;
+/**
+ * The editable canvas: nodes, chat, drawings — same shape as a folder-backed
+ * file, id in the name and all, so a copy dropped into a synced folder imports
+ * as that canvas instead of shadowing it.
+ */
+export function filenameForCanvas(canvasName: string, canvasId: string): string {
+  return `${slugify(canvasName)}-${canvasId}.json`;
 }

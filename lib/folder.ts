@@ -95,6 +95,8 @@ export type FolderStatus = {
   writing: boolean;
   error: string | null;
   savedAt: number | null;
+  /** Files the last merge left alone, with the reason — never silently dropped. */
+  skipped: string[];
 };
 
 let handle: DirectoryHandle | null = null;
@@ -104,6 +106,7 @@ let status: FolderStatus = {
   writing: false,
   error: null,
   savedAt: null,
+  skipped: [],
 };
 
 const listeners = new Set<(status: FolderStatus) => void>();
@@ -250,8 +253,28 @@ function connect(directory: DirectoryHandle) {
  * problem than silently dropping one.
  */
 async function merge(directory: DirectoryHandle): Promise<number> {
+  const { entries, skipped } = await readAll(directory);
+  update({ skipped });
+
+  // Several files can carry the same canvas id — a rename on another machine,
+  // a git merge that kept both sides. Directory iteration order is arbitrary,
+  // so the newest edit wins explicitly rather than whichever is read last.
   const byId = new Map<string, CanvasFile>();
-  for (const file of await readAll(directory)) byId.set(file.id, file);
+  const fileNameOf = new Map<string, string>();
+  const duplicated = new Set<string>();
+  for (const { file, name } of entries) {
+    const existing = byId.get(file.id);
+    if (!existing) {
+      byId.set(file.id, file);
+      fileNameOf.set(file.id, name);
+      continue;
+    }
+    duplicated.add(file.id);
+    if (file.updatedAt > existing.updatedAt) {
+      byId.set(file.id, file);
+      fileNameOf.set(file.id, name);
+    }
+  }
 
   const contribute: CanvasFile[] = [];
   for (const meta of listCanvases()) {
@@ -265,29 +288,56 @@ async function merge(directory: DirectoryHandle): Promise<number> {
 
   importCanvasFiles([...byId.values()]);
 
-  if (contribute.length) {
+  // Stale duplicates of a locally-newer canvas are already removed by
+  // writeFile's cleanup; the rest are pruned here so they stop shadowing.
+  const contributed = new Set(contribute.map((file) => file.id));
+  const heals = [...duplicated].filter((id) => !contributed.has(id));
+
+  if (contribute.length || heals.length) {
     update({ writing: true, error: null });
     await enqueue(async () => {
       for (const file of contribute) await writeFile(directory, file);
+      for (const id of heals) await removeFilesFor(directory, id, fileNameOf.get(id));
       update({ writing: false, savedAt: Date.now() });
     });
   }
   return byId.size;
 }
 
-async function readAll(directory: DirectoryHandle): Promise<CanvasFile[]> {
-  const files: CanvasFile[] = [];
+type ReadResult = {
+  entries: { file: CanvasFile; name: string }[];
+  skipped: string[];
+};
+
+async function readAll(directory: DirectoryHandle): Promise<ReadResult> {
+  const entries: { file: CanvasFile; name: string }[] = [];
+  const skipped: string[] = [];
   for await (const entry of directory.values()) {
     if (entry.kind !== "file" || !entry.name.endsWith(".json")) continue;
     const text = await (await entry.getFile()).text();
+    let parsed: CanvasFile;
     try {
-      const parsed = JSON.parse(text) as CanvasFile;
-      if (parsed?.id && Array.isArray(parsed.nodes)) files.push(parsed);
+      parsed = JSON.parse(text) as CanvasFile;
     } catch {
-      // A hand-edited or half-written file should not block the rest.
+      // Hand-edited or half-written — often git conflict markers.
+      skipped.push(`${entry.name} (unreadable — merge conflict?)`);
+      continue;
     }
+    if (!parsed?.id || !Array.isArray(parsed.nodes)) {
+      skipped.push(`${entry.name} (not a canvas file)`);
+      continue;
+    }
+    // A file whose name doesn't carry its canvas id — a "download json" copy
+    // dropped into the folder, say — would shadow the real file for that
+    // canvas on every merge, and the cleanup that prunes stale files could
+    // never match it. Leave it alone, but say so.
+    if (!belongsTo(entry.name, parsed.id)) {
+      skipped.push(`${entry.name} (filename doesn't match its canvas id)`);
+      continue;
+    }
+    entries.push({ file: parsed, name: entry.name });
   }
-  return files;
+  return { entries, skipped };
 }
 
 /* Public actions. Each picker call must happen in a user gesture. */
@@ -311,15 +361,25 @@ export async function disconnectFolder(): Promise<void> {
   handle = null;
   setMirror(null);
   await rememberHandle(null);
-  update({ name: null, needsPermission: false, error: null, savedAt: null });
+  update({ name: null, needsPermission: false, error: null, savedAt: null, skipped: [] });
 }
 
 /**
  * Reconnects the remembered folder on startup and reconciles it, picking up
  * anything pulled in from another machine since the last visit. Returns true if
  * a folder is connected afterwards.
+ *
+ * Runs once per session no matter how many pages ask — the home list and the
+ * root layout both call it on mount, and a second merge would be wasted work.
  */
-export async function restoreFolder(): Promise<boolean> {
+let restorePromise: Promise<boolean> | null = null;
+
+export function restoreFolder(): Promise<boolean> {
+  if (!restorePromise) restorePromise = restoreFolderOnce();
+  return restorePromise;
+}
+
+async function restoreFolderOnce(): Promise<boolean> {
   if (!isFolderSupported()) return false;
 
   let remembered: DirectoryHandle | undefined;
