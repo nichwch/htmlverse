@@ -1,25 +1,25 @@
 "use client";
 
-import { useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import type { MessagePart } from "@/lib/types";
+import { messageText } from "@/lib/mentions";
 import type { Mentionable } from "@/lib/mentions";
 import { isImageFile, prepareImage } from "@/lib/images";
 import { KindIcon, kindIconSvg, kindTextClass, mentionChipClass, outputKind } from "./nodeKinds";
 
 /**
  * Plain-text chat input with @mention chips. The DOM is the source of truth
- * while typing; `serialize` flattens it back to plaintext (chips → "@name")
- * for the model. Typing "@" opens an autocomplete over the canvas's node names.
+ * while typing; `serialize` preserves chip IDs alongside their readable labels. Typing "@" opens an autocomplete over the canvas's node names.
  */
 export default function MentionInput({
-  getOptions,
+  options,
   placeholder,
   disabled,
   extraAttachments,
   allowEmpty,
   onSubmit,
 }: {
-  /** Called when the menu opens, so the list is always current without subscribing. */
-  getOptions: () => Mentionable[];
+  options: Mentionable[];
   placeholder: string;
   /** While true, Enter keeps the draft instead of submitting into a busy node. */
   disabled?: boolean;
@@ -27,13 +27,21 @@ export default function MentionInput({
   extraAttachments?: ReactNode;
   /** Allow submit with no text and no images (e.g. annotations waiting above). */
   allowEmpty?: boolean;
-  onSubmit: (text: string, images: string[]) => void;
+  onSubmit: (text: string, images: string[], parts: MessagePart[]) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [query, setQuery] = useState<string | null>(null);
-  const [options, setOptions] = useState<Mentionable[]>([]);
   const [active, setActive] = useState(0);
   const [images, setImages] = useState<string[]>([]);
+
+  useEffect(() => {
+    ref.current?.querySelectorAll<HTMLElement>("[data-node-id]").forEach((chip) => {
+      const target = options.find((option) => option.id === chip.dataset.nodeId);
+      if (!target) return;
+      chip.dataset.mention = target.name;
+      if (chip.firstChild?.nodeType === Node.TEXT_NODE) chip.firstChild.textContent = `@${target.name}`;
+    });
+  }, [options]);
 
   async function addImages(files: FileList | File[]) {
     const accepted = [...files].filter(isImageFile);
@@ -75,7 +83,6 @@ export default function MentionInput({
       setQuery(null);
       return;
     }
-    if (query === null) setOptions(getOptions());
     if (hit.query !== query) setActive(0);
     setQuery(hit.query);
   }
@@ -93,6 +100,7 @@ export default function MentionInput({
     const chip = document.createElement("span");
     chip.contentEditable = "false";
     chip.dataset.mention = option.name;
+    chip.dataset.nodeId = option.id;
     chip.className = mentionChipClass(kind);
     chip.textContent = `@${option.name}`;
     const icon = document.createElement("span");
@@ -114,31 +122,39 @@ export default function MentionInput({
     setQuery(null);
   }
 
-  function serialize(el: Node): string {
-    let out = "";
-    el.childNodes.forEach((child) => {
-      if (child.nodeType === Node.TEXT_NODE) {
-        out += child.textContent;
-      } else if (child instanceof HTMLElement && child.dataset.mention) {
-        out += `@${child.dataset.mention}`;
-      } else if (child.nodeName === "BR") {
-        out += "\n";
-      } else if (child instanceof HTMLElement) {
-        // Contenteditable wraps continuation lines in divs.
-        out += `\n${serialize(child)}`;
-      }
-    });
-    return out;
+  function serialize(el: Node): MessagePart[] {
+    const parts: MessagePart[] = [];
+    function text(value: string) {
+      const last = parts.at(-1);
+      if (last?.type === "text") last.value += value;
+      else parts.push({ type: "text", value });
+    }
+    function visit(parent: Node) {
+      parent.childNodes.forEach((child) => {
+        if (child.nodeType === Node.TEXT_NODE) text((child.textContent ?? "").replace(/ /g, " "));
+        else if (child instanceof HTMLElement && child.dataset.mention && child.dataset.nodeId) {
+          const current = options.find((option) => option.id === child.dataset.nodeId);
+          parts.push({ type: "mention", nodeId: child.dataset.nodeId, name: current?.name ?? child.dataset.mention });
+        } else if (child.nodeName === "BR") text("\n");
+        else if (child instanceof HTMLElement) { text("\n"); visit(child); }
+      });
+    }
+    visit(el);
+    if (parts[0]?.type === "text") parts[0].value = parts[0].value.trimStart();
+    const last = parts.at(-1);
+    if (last?.type === "text") last.value = last.value.trimEnd();
+    return parts.filter((part) => part.type !== "text" || part.value);
   }
 
   function submit() {
     if (!ref.current || disabled) return;
-    const text = serialize(ref.current).replace(/ /g, " ").trim();
+    const parts = serialize(ref.current);
+    const text = messageText(parts);
     if (!text && !images.length && !allowEmpty) return;
     ref.current.innerHTML = "";
     setQuery(null);
     setImages([]);
-    onSubmit(text, images);
+    onSubmit(text, images, parts);
   }
 
   function onKeyDown(event: React.KeyboardEvent) {

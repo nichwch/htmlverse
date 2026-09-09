@@ -17,7 +17,7 @@ import "@xyflow/react/dist/style.css";
 import PromptNode, { type PromptFlowNode } from "./PromptNode";
 import NodePanel from "./NodePanel";
 import SettingsModal from "./SettingsModal";
-import { CanvasIdProvider } from "./CanvasContext";
+import { CanvasIdProvider, FullscreenProvider } from "./CanvasContext";
 import { ForkIcon, GearIcon } from "./icons";
 import {
   forkCanvas,
@@ -82,6 +82,7 @@ function toStoredNodes(nodes: PromptFlowNode[]): StoredNode[] {
       drawItems: data.drawItems,
       drawBase: data.drawBase,
       wireframe: data.wireframe,
+      photos: data.photos,
       photo: data.photo,
       photoStrokes: data.photoStrokes,
       photoMarked: data.photoMarked,
@@ -297,9 +298,9 @@ export default function Canvas({ canvasId }: { canvasId: string }) {
 
   return (
     <CanvasIdProvider value={canvasId}>
-      <ReactFlowProvider>
+      <FullscreenProvider><ReactFlowProvider>
         <CanvasInner canvasId={canvasId} name={meta.name} />
-      </ReactFlowProvider>
+      </ReactFlowProvider></FullscreenProvider>
     </CanvasIdProvider>
   );
 }

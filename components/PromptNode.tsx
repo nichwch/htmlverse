@@ -18,18 +18,18 @@ import {
   MIN_NODE_WIDTH,
   MIN_SIDEBAR_WIDTH,
   type ChatMessage,
+  type MessagePart,
   type HtmlAnnotation,
   type NodeTab,
-  type DrawStroke,
   type PromptNodeData,
   type ReasoningEffort,
 } from "@/lib/types";
 import { CUSTOM_MODEL, MODEL_GROUPS, isKnownModel } from "@/lib/models";
 import { getApiKey, getInstructions } from "@/lib/storage";
 import { compactRun, looksLikeHtmlDocument, runAgent } from "@/lib/agent/loop";
-import { buildMentionContext, splitMentions, type Mentionable } from "@/lib/mentions";
-import { formatAnnotations, numberAnnotations, type AnnotateHover } from "@/lib/annotate";
-import { useCanvasId } from "./CanvasContext";
+import { resolveMessageParts, snapshotReferences, userMessageForApi, type Mentionable } from "@/lib/mentions";
+import { numberAnnotations, type AnnotateHover } from "@/lib/annotate";
+import { useCanvasId, useNodeFullscreen } from "./CanvasContext";
 import { useDebouncedValue } from "./useDebouncedValue";
 import { withTailwind } from "@/lib/preview";
 import { markdownDocument } from "@/lib/markdown";
@@ -49,14 +49,14 @@ import { resolveItems } from "@/lib/drawing";
 import { WireframePane, WireframeToolbar, type WireframeTool } from "./WireframePane";
 import { DEFAULT_FONT_SIZE } from "@/lib/wireframe";
 import { defaultNodeName, isDefaultNodeName, matchesTabLabel } from "@/lib/nodeNames";
-import { PhotoPane, PhotoToolbar, type PhotoPaneHandle } from "./PhotoPane";
+import { PhotoGallery } from "./PhotoGallery";
+import { nodePhotos, photoSources } from "@/lib/photos";
+import type { NodePhoto } from "@/lib/types";
+import { PhotoToolbar, type PhotoPaneHandle } from "./PhotoPane";
 import HtmlPreview from "./HtmlPreview";
 import AnnotationWidget from "./AnnotationWidget";
 
 export type PromptFlowNode = Node<PromptNodeData, "prompt">;
-
-/** Stable identity so an undrawn node doesn't remount the draw surface. */
-const EMPTY_STROKES: DrawStroke[] = [];
 
 /**
  * Tabs in bar order. chat and html share a group because they are two views of
@@ -105,13 +105,6 @@ function isToolFailure(content: string): boolean {
   return content.startsWith("error:") || / error\(s\):/.test(content);
 }
 
-/** Past annotation chips are expanded only on the API copy of a user turn. */
-function userContentForApi(m: Extract<ChatMessage, { role: "user" }>): string {
-  const notes = m.annotations?.length ? formatAnnotations(m.annotations) : "";
-  if (notes && m.content) return `${m.content}\n\n${notes}`;
-  return notes || m.content;
-}
-
 type AnnotationDraft = AnnotateHover & { x: number; y: number };
 
 function PromptNode({ id, data, width, height, selected }: NodeProps<PromptFlowNode>) {
@@ -136,7 +129,22 @@ function PromptNode({ id, data, width, height, selected }: NodeProps<PromptFlowN
   const [photoSettings, setPhotoSettings] = useState<DrawingSettings>(DEFAULT_DRAWING_SETTINGS);
   const photoRef = useRef<PhotoPaneHandle>(null);
 
-  const [fullscreen, setFullscreen] = useState(false);
+  const [selectedPhotoId, setSelectedPhotoId] = useState<string | null>(null);
+  const photos = nodePhotos(data);
+  const activePhoto = photos.find((photo) => photo.id === selectedPhotoId) ?? photos[0];
+
+  function changePhotos(change: (current: NodePhoto[]) => NodePhoto[]) {
+    const current = getNode(id);
+    if (!current) return;
+    updateNodeData(id, {
+      photos: change(nodePhotos(current.data)),
+      photo: null, photoStrokes: undefined, photoMarked: null,
+    });
+  }
+
+  const { nodeId: fullscreenNodeId, open: openFullscreen } = useNodeFullscreen();
+  const fullscreen = fullscreenNodeId === id;
+  function setFullscreen(open: boolean) { openFullscreen(open ? id : null); }
   const [annotating, setAnnotating] = useState(false);
   const [annotations, setAnnotations] = useState<HtmlAnnotation[]>([]);
   const [highlightId, setHighlightId] = useState<string | null>(null);
@@ -168,13 +176,13 @@ function PromptNode({ id, data, width, height, selected }: NodeProps<PromptFlowN
         return;
       }
       if (fullscreen) {
-        setFullscreen(false);
+        openFullscreen(null);
         event.preventDefault();
       }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [annotating, draft, fullscreen]);
+  }, [annotating, draft, fullscreen, openFullscreen]);
 
   // Other nodes' names and tabs, kept reactive via a joined string so renames
   // and tab switches elsewhere update this node's chips/autocomplete without
@@ -198,7 +206,6 @@ function PromptNode({ id, data, width, height, selected }: NodeProps<PromptFlowN
         .filter((m) => m.name && m.id !== id),
     [mentionKey, id]
   );
-  const mentionNames = useMemo(() => mentionables.map((m) => m.name), [mentionables]);
 
   const sidebarWidth = data.sidebarWidth ?? DEFAULT_SIDEBAR_WIDTH;
   const chatInputHeight = data.chatInputHeight ?? DEFAULT_CHAT_INPUT_HEIGHT;
@@ -235,13 +242,18 @@ function PromptNode({ id, data, width, height, selected }: NodeProps<PromptFlowN
     return previewHtml ? withTailwind(previewHtml) : null;
   }, [tab, previewMarkdown, previewHtml]);
 
-  async function send(prompt: string, images: string[]) {
+  async function send(prompt: string, images: string[], draftParts?: MessagePart[]) {
     if (data.loading) return;
 
+    const mentionTargets = getNodes().filter((node) => node.id !== id);
+    const parts = resolveMessageParts(draftParts ?? [{ type: "text", value: prompt }], mentionTargets);
+    const referenceContext = snapshotReferences(parts, mentionTargets);
     const pending = annotations;
     const userMessage: ChatMessage = {
       role: "user",
       content: prompt,
+      parts,
+      ...(referenceContext ? { referenceContext } : {}),
       ...(images.length ? { images } : {}),
       ...(pending.length ? { annotations: pending } : {}),
     };
@@ -265,11 +277,7 @@ function PromptNode({ id, data, width, height, selected }: NodeProps<PromptFlowN
         return { ...m, content: "(rendered an earlier version of the document)" };
       }
       if (m.role === "user") {
-        return {
-          role: "user" as const,
-          content: userContentForApi(m),
-          ...(m.images?.length ? { images: m.images } : {}),
-        };
+        return userMessageForApi(m);
       }
       return m;
     });
@@ -278,23 +286,7 @@ function PromptNode({ id, data, width, height, selected }: NodeProps<PromptFlowN
     abortRef.current = controller;
     setActivity({ startedAt: Date.now(), tool: null });
 
-    // Mentions expand into the API copy of this turn only; the stored
-    // transcript keeps the raw @name text for chip rendering. Mentioned nodes
-    // on an image tab (draw/wire/photo) contribute their output as attachments.
-    const mentionTargets = getNodes()
-      .filter((n) => n.id !== id && n.data.name?.trim())
-      .map((n) => ({ name: n.data.name!.trim(), data: n.data }));
-    const context = buildMentionContext(prompt, mentionTargets);
-    const apiImages = [...images, ...(context?.images ?? [])];
-    const extras = [context?.text, formatAnnotations(pending)].filter(Boolean).join("\n\n");
-    const apiMessages: ChatMessage[] = [
-      ...priorMessages,
-      {
-        role: "user",
-        content: extras ? (prompt ? `${prompt}\n\n${extras}` : extras) : prompt,
-        ...(apiImages.length ? { images: apiImages } : {}),
-      },
-    ];
+    const apiMessages: ChatMessage[] = [...priorMessages, userMessageForApi(userMessage)];
 
     try {
       const result = await runAgent({
@@ -347,6 +339,10 @@ function PromptNode({ id, data, width, height, selected }: NodeProps<PromptFlowN
     const node = getNode(id);
     if (!node) return;
     const nodeWidth = node.width ?? DEFAULT_NODE_WIDTH;
+    const taken = new Set(getNodes().map((node) => node.data.name?.trim()));
+    const baseName = `${data.name?.trim() || "chat"} fork`;
+    let forkName = baseName;
+    for (let suffix = 2; taken.has(forkName); suffix++) forkName = `${baseName} ${suffix}`;
     const copy: PromptFlowNode = {
       id: crypto.randomUUID(),
       type: "prompt",
@@ -357,8 +353,8 @@ function PromptNode({ id, data, width, height, selected }: NodeProps<PromptFlowN
       selected: true,
       data: {
         ...data,
-        // Names resolve mentions, so the copy must not collide with the original.
-        name: data.name?.trim() ? `${data.name.trim()} fork` : undefined,
+        // Give autocomplete a distinct name; existing references keep their IDs.
+        name: forkName,
         messages: [...data.messages],
         loading: false,
         error: null,
@@ -386,12 +382,12 @@ function PromptNode({ id, data, width, height, selected }: NodeProps<PromptFlowN
     updateNodeData(id, { tab: next, name: defaultNodeName(next, taken) });
   }
 
-  function findByName(name: string) {
-    return getNodes().find((n) => n.id !== id && n.data.name?.trim() === name);
+  function findById(nodeId: string) {
+    return getNode(nodeId);
   }
 
-  function chipTarget(name: string) {
-    const node = findByName(name);
+  function chipTarget(nodeId: string) {
+    const node = findById(nodeId);
     if (!node) return null;
     return {
       tab: node.data.tab ?? ("chat" as NodeTab),
@@ -399,14 +395,15 @@ function PromptNode({ id, data, width, height, selected }: NodeProps<PromptFlowN
       markdown: node.data.markdown ?? null,
       drawing: node.data.drawing ?? null,
       wireframe: node.data.wireframe ?? [],
-      photo: node.data.photoMarked ?? node.data.photo ?? null,
+      photo: photoSources(node.data)[0] ?? null,
+      photos: photoSources(node.data),
       width: node.width ?? DEFAULT_NODE_WIDTH,
       height: node.height ?? DEFAULT_NODE_HEIGHT,
     };
   }
 
-  function jumpTo(name: string) {
-    const node = findByName(name);
+  function jumpTo(nodeId: string) {
+    const node = findById(nodeId);
     if (node) fitView({ nodes: [{ id: node.id }], duration: 600, padding: 0.15, maxZoom: 1 });
   }
 
@@ -551,7 +548,7 @@ function PromptNode({ id, data, width, height, selected }: NodeProps<PromptFlowN
           </span>
           <button
             className="nodrag shrink-0 text-neutral-500 hover:text-neutral-900"
-            onClick={() => setFullscreen((open) => !open)}
+            onClick={() => setFullscreen(!fullscreen)}
             title={fullscreen ? "exit fullscreen" : "fullscreen — iterate on this node focused"}
             aria-label={fullscreen ? "exit fullscreen" : "fullscreen"}
             aria-pressed={fullscreen}
@@ -616,6 +613,7 @@ function PromptNode({ id, data, width, height, selected }: NodeProps<PromptFlowN
                         if (m.role === "user") {
                           return (
                             <p key={i} className="m-2 whitespace-pre-wrap">
+                              {m.referenceContext?.recovered && <span className="mb-1 block text-neutral-400" title="This older message did not save its original references. Context was recovered from the nodes available when this canvas was opened.">recovered reference context</span>}
                               {m.annotations && m.annotations.length > 0 && (
                                 <span className="mb-1 flex flex-wrap gap-1">
                                   {m.annotations.map((a) => (
@@ -636,15 +634,15 @@ function PromptNode({ id, data, width, height, selected }: NodeProps<PromptFlowN
                                   ))}
                                 </span>
                               )}
-                              {splitMentions(m.content, mentionNames).map((part, j) =>
+                              {(m.parts ?? [{ type: "text" as const, value: m.content }]).map((part, j) =>
                                 part.type === "text" ? (
                                   <span key={j}>{part.value}</span>
                                 ) : (
                                   <MentionChip
                                     key={j}
-                                    name={part.name}
-                                    target={chipTarget(part.name)}
-                                    onJump={() => jumpTo(part.name)}
+                                    name={getNode(part.nodeId)?.data.name?.trim() || part.name}
+                                    target={chipTarget(part.nodeId)}
+                                    onJump={() => jumpTo(part.nodeId)}
                                   />
                                 )
                               )}
@@ -756,7 +754,7 @@ function PromptNode({ id, data, width, height, selected }: NodeProps<PromptFlowN
                         </div>
                         <div className="min-h-0 min-w-0 flex-1">
                           <MentionInput
-                            getOptions={() => mentionables}
+                            options={mentionables}
                             placeholder="describe the interface… @ to reference another node"
                             disabled={data.loading}
                             allowEmpty={annotations.length > 0}
@@ -828,12 +826,12 @@ function PromptNode({ id, data, width, height, selected }: NodeProps<PromptFlowN
 
                 {tab === "photo" && (
                   <PhotoToolbar
-                    photo={data.photo ?? null}
-                    hasDrawings={(data.photoStrokes ?? []).length > 0}
+                    photo={activePhoto?.src ?? null}
+                    photoName={activePhoto?.name}
+                    hasDrawings={Boolean(activePhoto?.strokes.length)}
                     settings={photoSettings}
-                    onChange={(photo) =>
-                      updateNodeData(id, { photo, photoStrokes: [], photoMarked: null })
-                    }
+                    onUpload={() => photoRef.current?.upload()}
+                    onRemove={() => changePhotos((current) => current.filter((photo) => photo.id !== activePhoto?.id))}
                     onSettingsChange={setPhotoSettings}
                     onUndo={() => photoRef.current?.undo()}
                     onClearDrawings={() => photoRef.current?.clearDrawings()}
@@ -873,15 +871,14 @@ function PromptNode({ id, data, width, height, selected }: NodeProps<PromptFlowN
                 onChange={(wireframe) => updateNodeData(id, { wireframe })}
               />
             ) : tab === "photo" ? (
-              <PhotoPane
-                photo={data.photo ?? null}
-                strokes={data.photoStrokes ?? EMPTY_STROKES}
+              <PhotoGallery
+                photos={photos}
+                activeId={activePhoto?.id ?? null}
+                onSelect={setSelectedPhotoId}
                 settings={photoSettings}
-                onChange={(photo) =>
-                  updateNodeData(id, { photo, photoStrokes: [], photoMarked: null })
-                }
-                onCommit={(photoStrokes, photoMarked) =>
-                  updateNodeData(id, { photoStrokes, photoMarked })
+                onAdd={(added) => changePhotos((current) => [...current, ...added])}
+                onCommit={(photoId, strokes, marked) =>
+                  changePhotos((current) => current.map((photo) => photo.id === photoId ? { ...photo, strokes, marked } : photo))
                 }
                 handleRef={photoRef}
               />

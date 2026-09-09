@@ -20,8 +20,19 @@ export type HtmlAnnotation = {
   comment: string;
 };
 
+export type MessagePart =
+  | { type: "text"; value: string }
+  | { type: "mention"; nodeId: string; name: string };
+
+export type ReferenceContext = {
+  text: string;
+  images: string[];
+  /** Legacy transcripts did not retain context; this snapshot is from migration time. */
+  recovered?: boolean;
+};
+
 export type ChatMessage =
-  | { role: "user"; content: string; images?: string[]; annotations?: HtmlAnnotation[] }
+  | { role: "user"; content: string; images?: string[]; annotations?: HtmlAnnotation[]; parts?: MessagePart[]; referenceContext?: ReferenceContext }
   | {
       role: "assistant";
       content: string | null;
@@ -112,7 +123,17 @@ export type DrawLayer = {
   items: DrawItem[];
 };
 
+export type NodePhoto = {
+  id: string;
+  name: string;
+  src: string;
+  strokes: DrawStroke[];
+  marked: string | null;
+};
+
 export type PromptNodeData = {
+  /** Ordered gallery; legacy photo fields are migrated on first edit. */
+  photos?: NodePhoto[];
   model: string;
   messages: ChatMessage[];
   html: string | null;

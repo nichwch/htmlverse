@@ -24,7 +24,7 @@ export default function MentionChip({
   onJump,
 }: {
   name: string;
-  /** null when the mentioned node has been deleted or renamed. */
+  /** null when the mentioned node has been deleted. */
   target: NodeOutput | null;
   onJump: () => void;
 }) {

@@ -55,7 +55,7 @@ export function WebcamCapture({
   function takePhoto() {
     const video = videoRef.current;
     if (!video || !video.videoWidth) return;
-    onCapture(captureFrame(video, true));
+    onCapture(captureFrame(video, false));
   }
 
   if (error) {
@@ -71,7 +71,7 @@ export function WebcamCapture({
 
   return (
     <div className="nodrag nowheel flex h-full w-full flex-col bg-black">
-      {/* Mirrored like a mirror, and captureFrame bakes the same flip in. */}
+      {/* Mirror the live preview; save the camera orientation so the captured photo flips left to right. */}
       <video
         ref={videoRef}
         autoPlay

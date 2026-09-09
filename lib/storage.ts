@@ -1,3 +1,4 @@
+import { forkNodes, migrateMessageReferences } from "./mentions";
 import {
   API_KEY_STORAGE_KEY,
   EXPORT_LAYOUT_STORAGE_KEY,
@@ -118,7 +119,7 @@ export function forkCanvas(id: string): CanvasMeta | null {
     createdAt: now,
     updatedAt: now,
   };
-  const nodes = loadNodes(id).map((n) => ({ ...n, id: crypto.randomUUID() }));
+  const nodes = forkNodes(loadNodes(id));
   localStorage.setItem(nodesKey(meta.id), JSON.stringify(nodes));
   localStorage.setItem(instructionsKey(meta.id), getInstructions(id));
   writeIndex([meta, ...listCanvases()]);
@@ -127,7 +128,7 @@ export function forkCanvas(id: string): CanvasMeta | null {
 }
 
 export function loadNodes(canvasId: string): StoredNode[] {
-  return read<StoredNode[]>(nodesKey(canvasId), []);
+  return migrateMessageReferences(read<StoredNode[]>(nodesKey(canvasId), []));
 }
 
 export function saveNodes(canvasId: string, nodes: StoredNode[]) {

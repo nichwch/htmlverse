@@ -8,6 +8,10 @@ import type { PromptFlowNode } from "./PromptNode";
 import { KindIcon, kindTextClass, outputKind } from "./nodeKinds";
 import { NodePreviewContent, type NodeOutput } from "./NodePreview";
 
+import { ExpandIcon } from "./icons";
+import { useNodeFullscreen } from "./CanvasContext";
+import { photoSources } from "@/lib/photos";
+
 const CARD_WIDTH = 240;
 const CARD_GAP = 8;
 const EDGE_PADDING = 8;
@@ -19,7 +23,8 @@ function nodeOutput(node: PromptFlowNode): NodeOutput {
     markdown: node.data.markdown ?? null,
     drawing: node.data.drawing ?? null,
     wireframe: node.data.wireframe ?? [],
-    photo: node.data.photoMarked ?? node.data.photo ?? null,
+    photo: photoSources(node.data)[0] ?? null,
+    photos: photoSources(node.data),
     width: node.width ?? DEFAULT_NODE_WIDTH,
     height: node.height ?? DEFAULT_NODE_HEIGHT,
   };
@@ -32,6 +37,7 @@ function nodeOutput(node: PromptFlowNode): NodeOutput {
  * renames it, and hovering shows a preview of its current contents.
  */
 export default function NodePanel({ nodes }: { nodes: PromptFlowNode[] }) {
+  const { open: openFullscreen } = useNodeFullscreen();
   const { fitView, updateNodeData } = useReactFlow<PromptFlowNode>();
   const [collapsed, setCollapsed] = useState(false);
   const [hovered, setHovered] = useState<{ id: string; anchor: DOMRect } | null>(null);
@@ -114,6 +120,7 @@ export default function NodePanel({ nodes }: { nodes: PromptFlowNode[] }) {
                     {node.data.name}
                   </span>
                 )}
+                <button className="shrink-0 p-1 text-neutral-400 hover:text-neutral-900" title="Open fullscreen" aria-label={`Open ${node.data.name} fullscreen`} onClick={(event) => { event.stopPropagation(); setHovered(null); openFullscreen(node.id); }}><ExpandIcon /></button>
               </div>
             );
           })}

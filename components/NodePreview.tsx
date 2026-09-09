@@ -14,6 +14,7 @@ export type NodeOutput = {
   drawing: string | null;
   wireframe: WireframeElement[];
   photo: string | null;
+  photos?: string[];
   width: number;
   height: number;
 };
@@ -45,6 +46,16 @@ export function NodePreviewContent({
     () => (target.tab === "wire" ? wireframeToDataUrl(target.wireframe) : null),
     [target.tab, target.wireframe]
   );
+
+  if (target.tab === "photo" && (target.photos?.length ?? 0) > 1) {
+    return <div className="grid h-full grid-cols-2 gap-1 overflow-hidden bg-neutral-100 p-1">
+      {target.photos!.slice(0, 4).map((src, index) => <div key={index} className="relative min-h-0 overflow-hidden">
+        {/* eslint-disable-next-line @next/next/no-img-element -- local data URL */}
+        <img src={src} alt={`@${name} photo ${index + 1}`} className="h-full w-full object-cover" />
+        {index === 3 && target.photos!.length > 4 && <span className="absolute inset-0 flex items-center justify-center bg-black/40 text-white">+{target.photos!.length - 4}</span>}
+      </div>)}
+    </div>;
+  }
 
   const image =
     target.tab === "draw" ? target.drawing : target.tab === "photo" ? target.photo : wireframeUrl;
