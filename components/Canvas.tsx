@@ -116,6 +116,7 @@ function TopBar({
 }) {
   const [name, setName] = useState(initialName);
   const router = useRouter();
+  const { getNodes } = useReactFlow<PromptFlowNode>();
 
   function updateName(value: string) {
     setName(value);
@@ -123,6 +124,9 @@ function TopBar({
   }
 
   function fork() {
+    // Fork the live document and transcript together, even before the
+    // debounced save fires. Navigation would otherwise cancel that save.
+    saveNodes(canvasId, toStoredNodes(getNodes()));
     const meta = forkCanvas(canvasId);
     if (meta) router.push(`/canvas/${meta.id}`);
   }

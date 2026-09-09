@@ -36,7 +36,7 @@ import { markdownDocument } from "@/lib/markdown";
 import { EyeClosedIcon, EyeIcon, ForkIcon, SidebarIcon, TrashIcon, ExpandIcon, CollapseIcon, AnnotateIcon } from "./icons";
 import { KindIcon, TabIcon, kindTextClass, mentionChipClass, outputKind } from "./nodeKinds";
 import CodeEditor from "./CodeEditor";
-import MentionInput from "./MentionInput";
+import MentionInput, { type MentionDraft } from "./MentionInput";
 import MentionChip from "./MentionChip";
 import {
   DEFAULT_DRAWING_SETTINGS,
@@ -113,6 +113,7 @@ function PromptNode({ id, data, width, height, selected }: NodeProps<PromptFlowN
   // A model saved before it was in the list — or typed by hand — opens in custom mode.
   const [customModel, setCustomModel] = useState(() => !isKnownModel(data.model));
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const [chatDraft, setChatDraft] = useState<MentionDraft>({ parts: [], images: [] });
   const abortRef = useRef<AbortController | null>(null);
   const canvasId = useCanvasId();
   // Local, not node data — a per-second tick must not churn canvas storage.
@@ -755,6 +756,8 @@ function PromptNode({ id, data, width, height, selected }: NodeProps<PromptFlowN
                         <div className="min-h-0 min-w-0 flex-1">
                           <MentionInput
                             options={mentionables}
+                            draft={chatDraft}
+                            onDraftChange={setChatDraft}
                             placeholder="describe the interface… @ to reference another node"
                             disabled={data.loading}
                             allowEmpty={annotations.length > 0}

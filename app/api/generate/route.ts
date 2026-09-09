@@ -9,6 +9,8 @@ const SYSTEM_PROMPT = [
   "The document renders in a sandboxed iframe. Tailwind CSS is injected into every render, so use utility classes freely and never add the Tailwind script yourself.",
   "You may use third-party libraries via script tags or ES module imports from jsdelivr/unpkg/esm.sh; always pin major versions.",
   "Use write_document for the first version or large rewrites, and edit_document for targeted changes — prefer edits, they are much faster. To go back to a saved version, use restore_version; never rewrite an old version by hand.",
+  "read_document returns the live working source, including changes from this run. Use it whenever you are unsure of the exact text to edit. Historical assistant/tool messages may be abbreviated, and referenced nodes are inputs rather than the document being edited.",
+  "If edit_document fails, nothing changed; its result includes the exact current source. Correct the match from that source instead of retrying the same text. An older version is not the current document. Use version tools only for intentionally inspecting or restoring history.",
   "After changing the document, call check_render once and fix any errors it reports.",
   "The current state of the document is provided below; user messages may include <referenced-node> blocks with content from the user's other nodes to draw from — HTML or markdown inline, or an attached image when that node's output is a hand-drawn sketch, wireframe, or photo — plus any images the user attached themselves, such as screenshots or mockups to match.",
   "When you are done, reply with a one or two sentence summary of what changed. Never include the document itself in your reply.",
@@ -66,7 +68,7 @@ export async function POST(req: NextRequest) {
       : "\n\nThere is no document yet — create one with write_document.";
     system += versionCount
       ? `\n\nThere are ${versionCount} saved earlier version(s); n=1 is the most recently saved.`
-      : "\n\nThere are no saved earlier versions yet.";
+      : "\n\nThere are no saved earlier versions yet. The first generated document is the current document; use read_document to read it. Version-history tools are unavailable.";
   }
 
   const upstream = new AbortController();

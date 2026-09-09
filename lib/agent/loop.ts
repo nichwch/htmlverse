@@ -6,7 +6,7 @@ import {
   type RunUsage,
   type ToolCall,
 } from "@/lib/types";
-import { TOOL_SCHEMAS, executeToolCall, type ToolContext } from "./tools";
+import { toolsForDocument, executeToolCall, type ToolContext } from "./tools";
 import type { CompletionMessage, CompletionUsage } from "./stream";
 
 export type RunAgentOptions = {
@@ -148,7 +148,7 @@ async function requestCompletion(
           // Squeezing a whole document through a JSON tool argument is slow and
           // truncation-prone, so the first generation runs without tools and
           // replies with raw HTML.
-          ...(html ? { tools: TOOL_SCHEMAS } : {}),
+          ...(html ? { tools: toolsForDocument(opts.versions.length) } : {}),
         }),
       });
     } catch (err) {
@@ -260,8 +260,8 @@ const MAX_STORED_TOOL_ARGS = 2000;
 /**
  * Shrinks a finished run before it enters the stored transcript: documents in
  * write_document args and bulky tool results (fetched versions) are stubbed —
- * the model can recover any of it through fetch_version, and future turns get
- * the current document injected anyway. Earlier turns are never touched, so
+ * these are historical actions, not a source of current HTML. Future turns
+ * get the live document and can reread it with read_document. Earlier turns are never touched, so
  * the prompt keeps a stable, cacheable prefix.
  */
 export function compactRun(messages: ChatMessage[]): ChatMessage[] {
@@ -282,7 +282,7 @@ export function compactRun(messages: ChatMessage[]): ChatMessage[] {
                 ...call,
                 function: {
                   ...call.function,
-                  arguments: JSON.stringify({ note: "(content omitted — see version history)" }),
+                  arguments: JSON.stringify({ note: "(historical content omitted — use read_document for current source)" }),
                 },
               }
             : call

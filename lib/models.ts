@@ -23,6 +23,7 @@ export const MODEL_GROUPS: ModelGroup[] = [
   {
     label: "openai",
     models: [
+      { id: "openai/gpt-6-astra", label: "gpt-6 astra" },
       { id: "openai/gpt-5.6-terra", label: "gpt-5.6 terra" },
       { id: "openai/gpt-5.6-sol", label: "gpt-5.6 sol" },
       { id: "openai/gpt-5.6-luna", label: "gpt-5.6 luna" },

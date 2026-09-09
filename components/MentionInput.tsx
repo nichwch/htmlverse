@@ -1,11 +1,29 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import type { MessagePart } from "@/lib/types";
 import { messageText } from "@/lib/mentions";
 import type { Mentionable } from "@/lib/mentions";
 import { isImageFile, prepareImage } from "@/lib/images";
 import { KindIcon, kindIconSvg, kindTextClass, mentionChipClass, outputKind } from "./nodeKinds";
+
+/** Session draft owned by the node, which survives input remounts. */
+export type MentionDraft = { parts: MessagePart[]; images: string[] };
+
+function createMentionChip(option: Mentionable): HTMLSpanElement {
+  const kind = outputKind(option.tab);
+  const chip = document.createElement("span");
+  chip.contentEditable = "false";
+  chip.dataset.mention = option.name;
+  chip.dataset.nodeId = option.id;
+  chip.className = mentionChipClass(kind);
+  chip.textContent = `@${option.name}`;
+  const icon = document.createElement("span");
+  icon.className = "inline-flex";
+  icon.innerHTML = kindIconSvg(kind);
+  chip.appendChild(icon);
+  return chip;
+}
 
 /**
  * Plain-text chat input with @mention chips. The DOM is the source of truth
@@ -13,6 +31,8 @@ import { KindIcon, kindIconSvg, kindTextClass, mentionChipClass, outputKind } fr
  */
 export default function MentionInput({
   options,
+  draft,
+  onDraftChange,
   placeholder,
   disabled,
   extraAttachments,
@@ -20,6 +40,8 @@ export default function MentionInput({
   onSubmit,
 }: {
   options: Mentionable[];
+  draft: MentionDraft;
+  onDraftChange: Dispatch<SetStateAction<MentionDraft>>;
   placeholder: string;
   /** While true, Enter keeps the draft instead of submitting into a busy node. */
   disabled?: boolean;
@@ -32,7 +54,21 @@ export default function MentionInput({
   const ref = useRef<HTMLDivElement>(null);
   const [query, setQuery] = useState<string | null>(null);
   const [active, setActive] = useState(0);
-  const [images, setImages] = useState<string[]>([]);
+  const { images } = draft;
+  const initialDraft = useRef(draft);
+  const initialOptions = useRef(options);
+
+  // Restore only on mount. Rewriting contenteditable while typing would move
+  // the caret and break the browser's native editing/undo behavior.
+  useLayoutEffect(() => {
+    const editor = ref.current;
+    if (!editor) return;
+    editor.replaceChildren(...initialDraft.current.parts.map((part) => {
+      if (part.type === "text") return document.createTextNode(part.value);
+      const option = initialOptions.current.find((option) => option.id === part.nodeId);
+      return createMentionChip(option ?? { id: part.nodeId, name: part.name, tab: "chat" });
+    }));
+  }, []);
 
   useEffect(() => {
     ref.current?.querySelectorAll<HTMLElement>("[data-node-id]").forEach((chip) => {
@@ -47,7 +83,7 @@ export default function MentionInput({
     const accepted = [...files].filter(isImageFile);
     if (!accepted.length) return;
     const prepared = await Promise.all(accepted.map(prepareImage));
-    setImages((current) => [...current, ...prepared]);
+    onDraftChange((current) => ({ ...current, images: [...current.images, ...prepared] }));
   }
 
   const filtered =
@@ -94,19 +130,7 @@ export default function MentionInput({
     hit.node.deleteData(hit.start, hit.end - hit.start);
     const rest = hit.node.splitText(hit.start);
 
-    // Colored by the node's output type at insertion time; the transcript chip
-    // re-resolves the type on every render once the message is sent.
-    const kind = outputKind(option.tab);
-    const chip = document.createElement("span");
-    chip.contentEditable = "false";
-    chip.dataset.mention = option.name;
-    chip.dataset.nodeId = option.id;
-    chip.className = mentionChipClass(kind);
-    chip.textContent = `@${option.name}`;
-    const icon = document.createElement("span");
-    icon.className = "inline-flex";
-    icon.innerHTML = kindIconSvg(kind);
-    chip.appendChild(icon);
+    const chip = createMentionChip(option);
 
     const space = document.createTextNode(" ");
     rest.parentNode!.insertBefore(chip, rest);
@@ -119,19 +143,21 @@ export default function MentionInput({
     selection.removeAllRanges();
     selection.addRange(caret);
 
+    saveDraft();
     setQuery(null);
   }
 
-  function serialize(el: Node): MessagePart[] {
+  function serialize(el: Node, trim = false): MessagePart[] {
     const parts: MessagePart[] = [];
     function text(value: string) {
+      if (trim) value = value.replace(/ /g, " ");
       const last = parts.at(-1);
       if (last?.type === "text") last.value += value;
       else parts.push({ type: "text", value });
     }
     function visit(parent: Node) {
       parent.childNodes.forEach((child) => {
-        if (child.nodeType === Node.TEXT_NODE) text((child.textContent ?? "").replace(/ /g, " "));
+        if (child.nodeType === Node.TEXT_NODE) text(child.textContent ?? "");
         else if (child instanceof HTMLElement && child.dataset.mention && child.dataset.nodeId) {
           const current = options.find((option) => option.id === child.dataset.nodeId);
           parts.push({ type: "mention", nodeId: child.dataset.nodeId, name: current?.name ?? child.dataset.mention });
@@ -140,20 +166,28 @@ export default function MentionInput({
       });
     }
     visit(el);
-    if (parts[0]?.type === "text") parts[0].value = parts[0].value.trimStart();
-    const last = parts.at(-1);
-    if (last?.type === "text") last.value = last.value.trimEnd();
+    if (trim) {
+      if (parts[0]?.type === "text") parts[0].value = parts[0].value.trimStart();
+      const last = parts.at(-1);
+      if (last?.type === "text") last.value = last.value.trimEnd();
+    }
     return parts.filter((part) => part.type !== "text" || part.value);
+  }
+
+  function saveDraft() {
+    if (!ref.current) return;
+    const parts = serialize(ref.current);
+    onDraftChange((current) => ({ ...current, parts }));
   }
 
   function submit() {
     if (!ref.current || disabled) return;
-    const parts = serialize(ref.current);
+    const parts = serialize(ref.current, true);
     const text = messageText(parts);
     if (!text && !images.length && !allowEmpty) return;
     ref.current.innerHTML = "";
     setQuery(null);
-    setImages([]);
+    onDraftChange({ parts: [], images: [] });
     onSubmit(text, images, parts);
   }
 
@@ -218,7 +252,7 @@ export default function MentionInput({
               <img src={src} alt="attached" className="h-10 border border-neutral-300" />
               <button
                 className="absolute -top-1 -right-1 h-4 w-4 border border-neutral-300 bg-white leading-none text-neutral-500 hover:text-red-600"
-                onClick={() => setImages((current) => current.filter((_, j) => j !== i))}
+                onClick={() => onDraftChange((current) => ({ ...current, images: current.images.filter((_, j) => j !== i) }))}
                 title="remove image"
                 aria-label="remove image"
               >
@@ -234,7 +268,7 @@ export default function MentionInput({
         contentEditable
         data-placeholder={placeholder}
         spellCheck={false}
-        onInput={refreshMenu}
+        onInput={() => { saveDraft(); refreshMenu(); }}
         onKeyDown={onKeyDown}
         onBlur={() => setQuery(null)}
         onPaste={(event) => {
@@ -247,6 +281,7 @@ export default function MentionInput({
             return;
           }
           document.execCommand("insertText", false, event.clipboardData.getData("text/plain"));
+          saveDraft();
         }}
       />
     </div>
