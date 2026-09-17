@@ -24,6 +24,8 @@ export type MessagePart =
   | { type: "text"; value: string }
   | { type: "mention"; nodeId: string; name: string };
 
+export type ChatDraft = { parts: MessagePart[]; images: string[] };
+
 export type ReferenceContext = {
   text: string;
   images: string[];
@@ -66,7 +68,7 @@ export type RunUsage = {
  * renders. The selected tab is also the node's output: @-mentioning a node
  * from another chat sends whatever its current tab holds.
  */
-export type NodeTab = "chat" | "html" | "md" | "draw" | "wire" | "photo";
+export type NodeTab = "chat" | "html" | "capture" | "md" | "draw" | "wire" | "photo";
 
 export type WireframeKind =
   | "box"
@@ -132,6 +134,7 @@ export type NodePhoto = {
 };
 
 export type PromptNodeData = {
+  chatDraft?: ChatDraft;
   /** Ordered gallery; legacy photo fields are migrated on first edit. */
   photos?: NodePhoto[];
   model: string;

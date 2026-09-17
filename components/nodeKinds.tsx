@@ -42,9 +42,10 @@ const STROKE = 'fill="none" stroke="currentColor" stroke-width="1.5"';
 const ROUND = 'stroke-linecap="round" stroke-linejoin="round"';
 
 /** Chat has no output type of its own — it renders html — but needs a glyph. */
-type IconKey = OutputKind | "chat";
+type IconKey = OutputKind | "chat" | "capture";
 
 const ICONS: Record<IconKey, IconSpec> = {
+  capture: { attrs: `${STROKE} ${ROUND}`, body: '<path d="M5 2H2v3m9-3h3v3M2 11v3h3m9-3v3h-3"/><path d="M6 6h5v5H6z"/>' },
   chat: {
     attrs: `${STROKE} ${ROUND}`,
     body: '<path d="M2.25 3.25h11.5v7.5H7.5L4.5 13.5v-2.75H2.25z"/>',
@@ -81,7 +82,7 @@ function iconSvg(key: IconKey, size: number): string {
 
 /** The glyph for a tab, which is its output type except for chat. */
 export function tabIconKey(tab: NodeTab): IconKey {
-  return tab === "chat" ? "chat" : outputKind(tab);
+  return tab === "chat" || tab === "capture" ? tab : outputKind(tab);
 }
 
 /**

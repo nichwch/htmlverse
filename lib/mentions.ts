@@ -167,10 +167,12 @@ export function migrateMessageReferences<T extends ReferenceNode>(nodes: T[]): T
 /** Whole-canvas forks remap links to copied nodes; historical snapshots stay frozen. */
 export function forkNodes(nodes: StoredNode[], newId: () => string = () => crypto.randomUUID()): StoredNode[] {
   const ids = new Map(nodes.map((node) => [node.id, newId()]));
+  const remap = (part: MessagePart): MessagePart => part.type === "mention" ? { ...part, nodeId: ids.get(part.nodeId) ?? part.nodeId } : part;
   return migrateMessageReferences(nodes).map((node) => ({ ...node, id: ids.get(node.id)!, data: {
     ...node.data,
+    ...(node.data.chatDraft ? { chatDraft: { ...node.data.chatDraft, parts: node.data.chatDraft.parts.map(remap) } } : {}),
     messages: node.data.messages.map((message) => message.role !== "user" ? message : {
-      ...message, parts: message.parts?.map((part) => part.type === "mention" ? { ...part, nodeId: ids.get(part.nodeId) ?? part.nodeId } : part),
+      ...message, parts: message.parts?.map(remap),
     }),
   } }));
 }

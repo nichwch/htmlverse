@@ -26,6 +26,7 @@ type DirectoryHandle = {
   kind: "directory";
   name: string;
   getFileHandle: (name: string, options?: { create?: boolean }) => Promise<FileHandle>;
+  getDirectoryHandle: (name: string, options?: { create?: boolean }) => Promise<DirectoryHandle>;
   removeEntry: (name: string, options?: { recursive?: boolean }) => Promise<void>;
   values: () => AsyncIterableIterator<FileHandle | DirectoryHandle>;
   queryPermission: (descriptor: { mode: "readwrite" }) => Promise<PermissionState>;
@@ -97,6 +98,7 @@ export type FolderStatus = {
   savedAt: number | null;
   /** Files the last merge left alone, with the reason — never silently dropped. */
   skipped: string[];
+  conflicts: string[];
 };
 
 let handle: DirectoryHandle | null = null;
@@ -107,6 +109,7 @@ let status: FolderStatus = {
   error: null,
   savedAt: null,
   skipped: [],
+  conflicts: [],
 };
 
 const listeners = new Set<(status: FolderStatus) => void>();
@@ -193,13 +196,80 @@ function enqueue(task: () => Promise<void>): Promise<void> {
   return chain;
 }
 
-async function writeFile(directory: DirectoryHandle, file: CanvasFile) {
-  const name = fileName(file);
+// The last disk contents this session observed, independent of wall-clock time.
+const observed = new Map<string, string>();
+const redirected = new Map<string, { id: string; name: string }>();
+
+function contents(file: CanvasFile): string {
+  return JSON.stringify({ name: file.name, instructions: file.instructions, nodes: file.nodes });
+}
+
+async function conflictCopy(file: CanvasFile, source: string): Promise<CanvasFile> {
+  // Stable IDs prevent the same competing version becoming a new copy on every refresh.
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${file.id}\0${source}\0${contents(file)}`));
+  const id = Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 32);
+  return { ...file, id, name: `${file.name} (${source} copy ${id.slice(0, 6)})` };
+}
+
+function reportConflict(name: string) {
+  update({ conflicts: [...new Set([...status.conflicts, name])] });
+}
+
+async function writeRaw(directory: DirectoryHandle, name: string, file: CanvasFile) {
   const target = await directory.getFileHandle(name, { create: true });
   const writable = await target.createWritable();
   await writable.write(serialize(file));
   await writable.close();
-  await removeFilesFor(directory, file.id, name);
+}
+
+/** Immutable recovery files also protect against another app overwriting after our check. */
+async function backup(directory: DirectoryHandle, file: CanvasFile) {
+  const history = await directory.getDirectoryHandle(".canvaschat-backups", { create: true });
+  await writeRaw(history, `recovery-${Date.now()}-${crypto.randomUUID()}-${file.id}.json`, file);
+}
+
+async function diskCopies(directory: DirectoryHandle, id: string): Promise<CanvasFile[]> {
+  const copies: CanvasFile[] = [];
+  for await (const entry of directory.values()) {
+    if (entry.kind !== "file" || !belongsTo(entry.name, id)) continue;
+    // An unreadable competing file is never overwritten or cleaned up.
+    const file = JSON.parse(await (await entry.getFile()).text()) as CanvasFile;
+    if (file.id !== id || !Array.isArray(file.nodes)) throw new Error(`Cannot safely overwrite ${entry.name}; its contents are invalid.`);
+    copies.push(file);
+  }
+  return copies;
+}
+
+async function writeFile(directory: DirectoryHandle, original: CanvasFile) {
+  const target = redirected.get(original.id);
+  let file = target ? { ...original, ...target } : original;
+  const copies = await diskCopies(directory, file.id);
+  const intended = contents(file);
+  const expected = observed.get(file.id);
+  const changedElsewhere = copies.some((copy) => contents(copy) !== intended && contents(copy) !== expected)
+    || (copies.length === 0 && expected !== undefined);
+
+  if (changedElsewhere) {
+    file = await conflictCopy(file, "conflict");
+    redirected.set(original.id, { id: file.id, name: file.name });
+    reportConflict(file.name);
+  } else if (copies.length && copies.every((copy) => contents(copy) === intended)) {
+    observed.set(file.id, intended);
+    return;
+  }
+
+  // Keep both the incoming work and any overwritten version outside root-file
+  // cleanup. Filenames are unique across localhost/production, even simultaneous writes.
+  await backup(directory, file);
+  if (!changedElsewhere) {
+    for (const previous of copies) {
+      if (contents(previous) !== intended) await backup(directory, previous);
+    }
+  }
+  await writeRaw(directory, fileName(file), file);
+  observed.set(file.id, contents(file));
+  // Do not delete alternate filenames here: another origin may have just saved
+  // a different version under one of them. Startup merge preserves those too.
 }
 
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -233,13 +303,18 @@ function scheduleRemove(canvasId: string) {
   const directory = handle;
   // The canvas is already out of localStorage by now, so its name is gone with
   // it — the file has to be found by id.
-  enqueue(() => removeFilesFor(directory, canvasId));
+  enqueue(async () => {
+    for (const previous of await diskCopies(directory, canvasId)) await backup(directory, previous);
+    await removeFilesFor(directory, canvasId);
+  });
 }
 
 function connect(directory: DirectoryHandle) {
   handle = directory;
   setMirror({ write: scheduleWrite, remove: scheduleRemove });
-  update({ name: directory.name, needsPermission: false, error: null });
+  observed.clear();
+  redirected.clear();
+  update({ name: directory.name, needsPermission: false, error: null, conflicts: [] });
 }
 
 /**
@@ -256,48 +331,50 @@ async function merge(directory: DirectoryHandle): Promise<number> {
   const { entries, skipped } = await readAll(directory);
   update({ skipped });
 
-  // Several files can carry the same canvas id — a rename on another machine,
-  // a git merge that kept both sides. Directory iteration order is arbitrary,
-  // so the newest edit wins explicitly rather than whichever is read last.
   const byId = new Map<string, CanvasFile>();
-  const fileNameOf = new Map<string, string>();
-  const duplicated = new Set<string>();
-  for (const { file, name } of entries) {
-    const existing = byId.get(file.id);
-    if (!existing) {
-      byId.set(file.id, file);
-      fileNameOf.set(file.id, name);
-      continue;
-    }
-    duplicated.add(file.id);
-    if (file.updatedAt > existing.updatedAt) {
-      byId.set(file.id, file);
-      fileNameOf.set(file.id, name);
-    }
+  const contribute: CanvasFile[] = [];
+  async function preserve(file: CanvasFile, source: string) {
+    const copy = await conflictCopy(file, source);
+    byId.set(copy.id, copy);
+    contribute.push(copy);
+    reportConflict(copy.name);
   }
 
-  const contribute: CanvasFile[] = [];
+  for (const { file } of entries) {
+    const existing = byId.get(file.id);
+    if (!existing) { byId.set(file.id, file); continue; }
+    if (contents(existing) === contents(file)) continue;
+    const [newer, older] = file.updatedAt > existing.updatedAt ? [file, existing] : [existing, file];
+    byId.set(file.id, newer);
+    await preserve(older, "folder");
+  }
+  for (const { file } of entries) observed.set(file.id, contents(byId.get(file.id)!));
+
   for (const meta of listCanvases()) {
     const local = exportCanvasFile(meta.id);
     if (!local) continue;
     const remote = byId.get(local.id);
-    if (remote && remote.updatedAt >= local.updatedAt) continue;
-    byId.set(local.id, local);
-    contribute.push(local);
+    if (!remote) {
+      byId.set(local.id, local);
+      contribute.push(local);
+    } else if (contents(local) !== contents(remote)) {
+      // Different content always retains both sides. Timestamps only choose
+      // which opens under the existing name; they never justify discarding work.
+      if (local.updatedAt >= remote.updatedAt) {
+        await preserve(remote, "folder");
+        byId.set(local.id, local);
+        contribute.push(local);
+      } else {
+        await preserve(local, "browser");
+      }
+    }
   }
 
   importCanvasFiles([...byId.values()]);
-
-  // Stale duplicates of a locally-newer canvas are already removed by
-  // writeFile's cleanup; the rest are pruned here so they stop shadowing.
-  const contributed = new Set(contribute.map((file) => file.id));
-  const heals = [...duplicated].filter((id) => !contributed.has(id));
-
-  if (contribute.length || heals.length) {
+  if (contribute.length) {
     update({ writing: true, error: null });
     await enqueue(async () => {
       for (const file of contribute) await writeFile(directory, file);
-      for (const id of heals) await removeFilesFor(directory, id, fileNameOf.get(id));
       update({ writing: false, savedAt: Date.now() });
     });
   }
@@ -375,7 +452,10 @@ export async function disconnectFolder(): Promise<void> {
 let restorePromise: Promise<boolean> | null = null;
 
 export function restoreFolder(): Promise<boolean> {
-  if (!restorePromise) restorePromise = restoreFolderOnce();
+  if (!restorePromise) restorePromise = restoreFolderOnce().catch((error) => {
+    update({ error: error instanceof Error ? error.message : "Could not restore the save folder." });
+    throw error;
+  });
   return restorePromise;
 }
 
@@ -410,6 +490,11 @@ export async function renewFolderPermission(): Promise<boolean> {
   if ((await remembered.requestPermission({ mode: "readwrite" })) !== "granted") return false;
 
   connect(remembered);
-  await merge(remembered);
-  return true;
+  try {
+    await merge(remembered);
+    return true;
+  } catch (error) {
+    update({ error: error instanceof Error ? error.message : "Could not reconnect the save folder." });
+    throw error;
+  }
 }

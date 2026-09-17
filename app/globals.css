@@ -28,6 +28,11 @@ body {
   cursor: default;
 }
 
+/* Previews must not swallow mouseup while any node is being dragged. */
+[data-node-dragging="true"] iframe {
+  pointer-events: none;
+}
+
 /* React Flow marks the pane grabbable at rest; only show the hand while actually panning. */
 .react-flow__pane.draggable {
   cursor: default;

@@ -1,6 +1,7 @@
 import type { NodeTab } from "./types";
 
 const TAB_LABELS: Record<NodeTab, string> = {
+  capture: "capture",
   chat: "chat",
   html: "html",
   md: "md",

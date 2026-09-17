@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -14,6 +14,8 @@ import {
   type NodeChange,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
+import { useCanvasAutosave } from "./useCanvasAutosave";
+import { useNodeDragCleanup } from "./useNodeDragCleanup";
 import PromptNode, { type PromptFlowNode } from "./PromptNode";
 import NodePanel from "./NodePanel";
 import SettingsModal from "./SettingsModal";
@@ -26,7 +28,6 @@ import {
   getInstructions,
   loadNodes,
   renameCanvas,
-  saveNodes,
   type CanvasFile,
 } from "@/lib/storage";
 import { defaultNodeName } from "@/lib/nodeNames";
@@ -74,6 +75,7 @@ function toStoredNodes(nodes: PromptFlowNode[]): StoredNode[] {
     data: {
       model: data.model,
       messages: data.messages,
+      chatDraft: data.chatDraft,
       html: data.html,
       markdown: data.markdown,
       drawing: data.drawing,
@@ -107,16 +109,17 @@ function TopBar({
   canvasId,
   initialName,
   onAdd,
+  onSave,
   onOpenSettings,
 }: {
   canvasId: string;
   initialName: string;
   onAdd: () => void;
+  onSave: () => boolean;
   onOpenSettings: () => void;
 }) {
   const [name, setName] = useState(initialName);
   const router = useRouter();
-  const { getNodes } = useReactFlow<PromptFlowNode>();
 
   function updateName(value: string) {
     setName(value);
@@ -124,16 +127,14 @@ function TopBar({
   }
 
   function fork() {
-    // Fork the live document and transcript together, even before the
-    // debounced save fires. Navigation would otherwise cancel that save.
-    saveNodes(canvasId, toStoredNodes(getNodes()));
+    if (!onSave()) return;
     const meta = forkCanvas(canvasId);
     if (meta) router.push(`/canvas/${meta.id}`);
   }
 
   return (
     <div className="absolute top-[15px] left-[15px] z-10 flex items-center gap-3 border border-neutral-300 bg-white p-2">
-      <Link className="text-neutral-500 hover:text-neutral-900" href="/">
+      <Link className="text-neutral-500 hover:text-neutral-900" href="/" onClick={(event) => { if (!onSave()) event.preventDefault(); }}>
         ← canvases
       </Link>
       <input
@@ -170,17 +171,10 @@ function CanvasInner({ canvasId, name }: { canvasId: string; name: string }) {
   const [nodes, setNodes] = useState<PromptFlowNode[]>(() => toFlowNodes(loadNodes(canvasId)));
   const [hasKey, setHasKey] = useState(() => Boolean(getApiKey()));
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const { screenToFlowPosition } = useReactFlow();
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Debounced so dragging and resizing don't hammer localStorage on every frame.
-  useEffect(() => {
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => saveNodes(canvasId, toStoredNodes(nodes)), 300);
-    return () => {
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-    };
-  }, [canvasId, nodes]);
+  const { screenToFlowPosition } = useReactFlow<PromptFlowNode>();
+  const storedNodes = useMemo(() => toStoredNodes(nodes), [nodes]);
+  const { error: saveError, flush } = useCanvasAutosave(canvasId, storedNodes);
+  const { canvasRef, onNodeDragStart, onNodeDragStop } = useNodeDragCleanup();
 
   const onNodesChange = useCallback(
     (changes: NodeChange<PromptFlowNode>[]) =>
@@ -241,17 +235,25 @@ function CanvasInner({ canvasId, name }: { canvasId: string; name: string }) {
   }, [canvasId, name, nodes]);
 
   return (
-    <div className="relative h-dvh w-dvw">
+    <div ref={canvasRef} className="relative h-dvh w-dvw">
       <TopBar
         canvasId={canvasId}
         initialName={name}
         onAdd={addNode}
+        onSave={flush}
         onOpenSettings={() => setSettingsOpen(true)}
       />
+      {saveError && <div role="alert" className="absolute bottom-4 left-1/2 z-[80] flex max-w-2xl -translate-x-1/2 items-center gap-3 border border-red-300 bg-red-50 p-3 text-red-800 shadow-sm">
+        <span>{saveError}</span>
+        <button className="shrink-0 underline" onClick={() => flush()}>retry save</button>
+        <button className="shrink-0 underline" onClick={() => setSettingsOpen(true)}>back up this canvas…</button>
+      </div>}
       <NodePanel nodes={nodes} />
       <ReactFlow
         nodes={nodes}
         onNodesChange={onNodesChange}
+        onNodeDragStart={onNodeDragStart}
+        onNodeDragStop={onNodeDragStop}
         nodeTypes={nodeTypes}
         minZoom={0.1}
         maxZoom={1}

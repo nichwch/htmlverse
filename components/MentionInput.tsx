@@ -1,14 +1,14 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
-import type { MessagePart } from "@/lib/types";
+import type { ChatDraft, MessagePart } from "@/lib/types";
 import { messageText } from "@/lib/mentions";
 import type { Mentionable } from "@/lib/mentions";
 import { isImageFile, prepareImage } from "@/lib/images";
 import { KindIcon, kindIconSvg, kindTextClass, mentionChipClass, outputKind } from "./nodeKinds";
 
 /** Session draft owned by the node, which survives input remounts. */
-export type MentionDraft = { parts: MessagePart[]; images: string[] };
+export type MentionDraft = ChatDraft;
 
 function createMentionChip(option: Mentionable): HTMLSpanElement {
   const kind = outputKind(option.tab);

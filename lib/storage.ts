@@ -40,11 +40,33 @@ export function setMirror(next: Mirror | null) {
 }
 
 function read<T>(key: string, fallback: T): T {
+  const raw = localStorage.getItem(key);
+  if (raw === null) return fallback;
   try {
-    const raw = localStorage.getItem(key);
-    return raw ? (JSON.parse(raw) as T) : fallback;
+    return JSON.parse(raw) as T;
   } catch {
-    return fallback;
+    // Never turn an unreadable save into an empty canvas that autosave overwrites.
+    throw new Error("Saved canvas data could not be read. The existing browser copy has been left untouched.");
+  }
+}
+
+/** Apply a group of storage writes without leaving a partial import on quota failure. */
+function writeBatch(entries: [string, string][]) {
+  const before = new Map(entries.map(([key]) => [key, localStorage.getItem(key)]));
+  const written: string[] = [];
+  try {
+    for (const [key, value] of entries) {
+      localStorage.setItem(key, value);
+      written.push(key);
+    }
+  } catch (error) {
+    // Release the replacement data first, so restoring previous values fits.
+    for (const key of written) localStorage.removeItem(key);
+    for (const key of written) {
+      const value = before.get(key);
+      if (value !== null && value !== undefined) localStorage.setItem(key, value);
+    }
+    throw error;
   }
 }
 
@@ -131,9 +153,21 @@ export function loadNodes(canvasId: string): StoredNode[] {
   return migrateMessageReferences(read<StoredNode[]>(nodesKey(canvasId), []));
 }
 
-export function saveNodes(canvasId: string, nodes: StoredNode[]) {
-  localStorage.setItem(nodesKey(canvasId), JSON.stringify(nodes));
-  writeIndex(listCanvases().map((c) => (c.id === canvasId ? { ...c, updatedAt: Date.now() } : c)));
+export class CanvasConflictError extends Error {}
+
+/** Exact persisted snapshot used to reject stale editor writes after a folder merge. */
+export function savedNodesSnapshot(canvasId: string): string | null {
+  return localStorage.getItem(nodesKey(canvasId));
+}
+
+export function saveNodes(canvasId: string, nodes: StoredNode[], expected?: string | null) {
+  if (expected !== undefined && savedNodesSnapshot(canvasId) !== expected) {
+    throw new CanvasConflictError("This canvas changed in another tab or during folder sync. Your edits have not overwritten it. Back up your edits before reloading.");
+  }
+  writeBatch([
+    [nodesKey(canvasId), JSON.stringify(nodes)],
+    [INDEX_KEY, JSON.stringify(listCanvases().map((c) => (c.id === canvasId ? { ...c, updatedAt: Date.now() } : c)))],
+  ]);
   mirror?.write(canvasId);
 }
 
@@ -144,28 +178,22 @@ export function exportCanvasFile(canvasId: string): CanvasFile | null {
   return { ...meta, instructions: getInstructions(canvasId), nodes: loadNodes(canvasId) };
 }
 
-/**
- * Replaces every canvas in this browser with the given set. Used when opening a
- * folder, where the folder is the copy worth keeping. Settings are untouched.
- */
+/** Merge folder snapshots without first deleting the browser's saved work. */
 export function importCanvasFiles(files: CanvasFile[]) {
-  for (const existing of listCanvases()) {
-    localStorage.removeItem(nodesKey(existing.id));
-    localStorage.removeItem(instructionsKey(existing.id));
-  }
-
-  const index: CanvasMeta[] = [];
+  const index = new Map(listCanvases().map((meta) => [meta.id, meta]));
+  const entries: [string, string][] = [];
   for (const file of files) {
-    localStorage.setItem(nodesKey(file.id), JSON.stringify(file.nodes ?? []));
-    localStorage.setItem(instructionsKey(file.id), file.instructions ?? "");
-    index.push({
-      id: file.id,
-      name: file.name,
-      createdAt: file.createdAt,
-      updatedAt: file.updatedAt,
-    });
+    if (!file.id || !Array.isArray(file.nodes) || !Number.isFinite(file.updatedAt)) {
+      throw new Error("A folder canvas is invalid. Browser saves have been left untouched.");
+    }
+    const local = index.get(file.id);
+    // A save may have completed while the folder was being read.
+    if (local && local.updatedAt >= file.updatedAt && localStorage.getItem(nodesKey(file.id)) !== null) continue;
+    entries.push([nodesKey(file.id), JSON.stringify(file.nodes)], [instructionsKey(file.id), file.instructions ?? ""]);
+    index.set(file.id, { id: file.id, name: file.name, createdAt: file.createdAt, updatedAt: file.updatedAt });
   }
-  writeIndex(index);
+  entries.push([INDEX_KEY, JSON.stringify([...index.values()])]);
+  writeBatch(entries);
 }
 
 /* Settings. The api key and export layout are global; instructions are per canvas. */

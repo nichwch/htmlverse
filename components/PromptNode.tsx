@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type SetStateAction } from "react";
 import { createPortal } from "react-dom";
 import { NodeResizer, useReactFlow, useStore, type Node, type NodeProps } from "@xyflow/react";
 import {
@@ -36,6 +36,8 @@ import { markdownDocument } from "@/lib/markdown";
 import { EyeClosedIcon, EyeIcon, ForkIcon, SidebarIcon, TrashIcon, ExpandIcon, CollapseIcon, AnnotateIcon } from "./icons";
 import { KindIcon, TabIcon, kindTextClass, mentionChipClass, outputKind } from "./nodeKinds";
 import CodeEditor from "./CodeEditor";
+import CapturePane from "./CapturePane";
+import { compactCaptureHtml } from "@/lib/capture";
 import MentionInput, { type MentionDraft } from "./MentionInput";
 import MentionChip from "./MentionChip";
 import {
@@ -62,10 +64,11 @@ export type PromptFlowNode = Node<PromptNodeData, "prompt">;
  * Tabs in bar order. chat and html share a group because they are two views of
  * the same output — chat generates the document, html edits it directly.
  */
-const TAB_GROUPS: NodeTab[][] = [["chat", "html"], ["md"], ["draw"], ["wire"], ["photo"]];
+const TAB_GROUPS: NodeTab[][] = [["chat", "html", "capture"], ["md"], ["draw"], ["wire"], ["photo"]];
 
 /** Icons carry no label, so the tooltip says what each tab is for. */
 const TAB_TITLES: Record<NodeTab, string> = {
+  capture: "capture — bring a component from another app into this node",
   chat: "chat — describe what you want and the model builds the html",
   html: "html — edit the generated document directly",
   md: "md — write markdown",
@@ -105,6 +108,8 @@ function isToolFailure(content: string): boolean {
   return content.startsWith("error:") || / error\(s\):/.test(content);
 }
 
+const EMPTY_CHAT_DRAFT: MentionDraft = { parts: [], images: [] };
+
 type AnnotationDraft = AnnotateHover & { x: number; y: number };
 
 function PromptNode({ id, data, width, height, selected }: NodeProps<PromptFlowNode>) {
@@ -113,7 +118,12 @@ function PromptNode({ id, data, width, height, selected }: NodeProps<PromptFlowN
   // A model saved before it was in the list — or typed by hand — opens in custom mode.
   const [customModel, setCustomModel] = useState(() => !isKnownModel(data.model));
   const chatEndRef = useRef<HTMLDivElement>(null);
-  const [chatDraft, setChatDraft] = useState<MentionDraft>({ parts: [], images: [] });
+  const chatDraft = data.chatDraft ?? EMPTY_CHAT_DRAFT;
+  function setChatDraft(next: SetStateAction<MentionDraft>) {
+    updateNodeData(id, (node) => ({
+      chatDraft: typeof next === "function" ? next(node.data.chatDraft ?? EMPTY_CHAT_DRAFT) : next,
+    }));
+  }
   const abortRef = useRef<AbortController | null>(null);
   const canvasId = useCanvasId();
   // Local, not node data — a per-second tick must not churn canvas storage.
@@ -783,6 +793,19 @@ function PromptNode({ id, data, width, height, selected }: NodeProps<PromptFlowN
                       </div>
                     </div>
                   </>
+                )}
+
+                {tab === "capture" && (
+                  <CapturePane hasHtml={Boolean(data.html)} disabled={Boolean(data.loading)} onImport={(html) => {
+                    const current = getNode(id)?.data;
+                    if (!current || current.loading) return;
+                    updateNodeData(id, {
+                      html,
+                      versions: current.html && current.html !== html
+                        ? [...(current.versions ?? []), { html: current.html, ts: Date.now() }].slice(-MAX_VERSIONS).map(version => ({ ...version, html: compactCaptureHtml(version.html) }))
+                        : current.versions,
+                    });
+                  }} />
                 )}
 
                 {tab === "html" && (

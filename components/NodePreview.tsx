@@ -20,6 +20,7 @@ export type NodeOutput = {
 };
 
 const EMPTY_NOTES: Record<NodeTab, string> = {
+  capture: "no capture yet",
   chat: "nothing rendered yet",
   html: "nothing rendered yet",
   md: "nothing written yet",

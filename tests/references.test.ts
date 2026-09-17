@@ -1,4 +1,8 @@
+import { packCaptureStyles } from "../lib/captureStyles";
+import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
 import assert from "node:assert/strict";
+import { parseCapture, MAX_CAPTURE_SIZE } from "../lib/capture";
 import test from "node:test";
 import { forkNodes, migrateMessageReferences, resolveMessageParts, snapshotReferences, userMessageForApi } from "../lib/mentions";
 import { nodePhotos, photoSources } from "../lib/photos";
@@ -63,4 +67,51 @@ test("legacy photos retain marks and an explicitly empty gallery never resurrect
   assert.deepEqual(photoSources(data({ photo: "original", photoMarked: "marked" })), ["marked"]);
   assert.equal(nodePhotos(data({ photo: "original" }))[0].id, "legacy-photo");
   assert.deepEqual(nodePhotos(data({ photos: [], photo: "legacy" })), []);
+});
+
+test("capture nodes contribute editable HTML to referenced chats", () => {
+  const targets = [node("captured", { name: "captured card", tab: "capture", html: '<article>Captured card</article>' })];
+  const parts = resolveMessageParts([{ type: "text", value: "Iterate on @captured card" }], targets);
+  const reference = snapshotReferences(parts, targets);
+  assert.ok(reference);
+  assert.match(reference.text, /<article>Captured card<\/article>/);
+});
+
+
+test("capture import validates format, version, content and size before replacing HTML", () => {
+  const capture = { format: "proto-capture", version: 1, title: "Card", source: "http://localhost:3000/example", html: "<article>Card</article>" };
+  assert.deepEqual(parseCapture(JSON.stringify(capture)), capture);
+  for (const invalid of ["plain text", "null", "{}", JSON.stringify({ ...capture, version: 2 }), JSON.stringify({ ...capture, html: " " })]) {
+    assert.throws(() => parseCapture(invalid));
+  }
+  assert.throws(() => parseCapture("x".repeat(MAX_CAPTURE_SIZE + 1)), /too large/);
+});
+
+
+test("style packing preserves each element's exact declarations without leaking defaults", () => {
+  const styles: [string, string][][] = [
+    [["color", "red"], ["display", "flex"], ["width", "100px"]],
+    [["color", "blue"], ["display", "flex"], ["width", "200px"]],
+    [["color", "red"], ["font-weight", "700"]],
+    [],
+  ];
+  const packed = packCaptureStyles(styles);
+  const declarations = new Map<string, [string, string][]>();
+  for (const match of packed.css.matchAll(/data-proto-style~="(c\d+)"\]\{([^}]+)\}/g)) {
+    declarations.set(match[1], match[2].split(";").filter(Boolean).map(declaration => {
+      const colon = declaration.indexOf(":");
+      return [declaration.slice(0, colon), declaration.slice(colon + 1)];
+    }));
+  }
+  styles.forEach((expected, index) => {
+    const actual = packed.tokens[index].split(" ").flatMap(token => declarations.get(token) ?? []);
+    assert.deepEqual(Object.fromEntries(actual), Object.fromEntries(expected));
+  });
+  const repeated = Array.from({ length: 300 }, () => styles[0]);
+  const compact = packCaptureStyles(repeated);
+  assert.ok(compact.css.length + compact.tokens.join(" ").length < JSON.stringify(repeated).length / 10);
+  const source = readFileSync("public/capture.js", "utf8");
+  const helper = source.slice(source.indexOf("  function packCaptureStyles("), source.indexOf("  const key = '__protoCaptureCancel'"));
+  const bookmarkletPacker = runInNewContext(helper + ";packCaptureStyles");
+  assert.deepEqual(JSON.parse(JSON.stringify(bookmarkletPacker(styles))), packed);
 });

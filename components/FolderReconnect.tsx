@@ -25,12 +25,21 @@ export default function FolderReconnect() {
     restoreFolder().catch(() => {});
   }, []);
 
-  if (!isFolderSupported() || !status.needsPermission || pathname === "/") return null;
-
+  if (!isFolderSupported()) return null;
+  if (status.error || status.conflicts.length) return (
+    <div role="status" className="fixed right-3 bottom-3 z-[70] max-w-sm border border-amber-300 bg-amber-50 p-3 text-amber-900">
+      {status.error ? <p>Folder save problem: {status.error}</p> : <>
+        <p>Competing versions were preserved as separate canvases:</p>
+        {status.conflicts.map((name) => <p key={name}>{name}</p>)}
+      </>}
+      <p className="mt-1">Recovery snapshots are kept in .canvaschat-backups inside your save folder.</p>
+    </div>
+  );
+  if (!status.needsPermission || pathname === "/") return null;
   return (
     <button
       className="fixed right-3 bottom-3 z-50 border border-neutral-300 bg-white px-2 py-1 text-neutral-500 hover:border-neutral-900 hover:text-neutral-900"
-      onClick={() => renewFolderPermission()}
+      onClick={() => { void renewFolderPermission().then((connected) => { if (connected) window.location.reload(); }).catch(() => {}); }}
     >
       reconnect {status.name}
     </button>
